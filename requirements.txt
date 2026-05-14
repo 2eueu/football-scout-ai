@@ -1,0 +1,15 @@
+soccerdata
+statsbombpy
+pandas
+numpy
+scikit-learn
+sqlalchemy
+fastapi
+uvicorn
+streamlit
+plotly
+google-generativeai
+python-dotenv
+requests
+beautifulsoup4
+lxml
