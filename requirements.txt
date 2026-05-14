@@ -3,12 +3,12 @@ statsbombpy
 pandas
 numpy
 scikit-learn
-sqlalchemy
-fastapi
-uvicorn
+xgboost
+torch
+groq
+pyarrow
 streamlit
 plotly
-google-generativeai
 python-dotenv
 requests
 beautifulsoup4

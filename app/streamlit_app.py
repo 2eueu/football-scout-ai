@@ -3,11 +3,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import json
+import sqlite3
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+
+# ── bootstrap: parquet → scout.db (Streamlit Cloud / fresh clone) ──────────
+def _bootstrap_db():
+    DB = Path(__file__).parent.parent / "scout.db"
+    if DB.exists():
+        return
+    DATA = Path(__file__).parent.parent / "data"
+    tables = {
+        "players_master":   DATA / "players_master.parquet",
+        "value_scouting":   DATA / "value_scouting.parquet",
+        "statsbomb_events": DATA / "statsbomb_events.parquet",
+    }
+    missing = [name for name, path in tables.items() if not path.exists()]
+    if missing:
+        st.error(f"데이터 파일 누락: {missing}")
+        st.stop()
+    conn = sqlite3.connect(DB)
+    for table, path in tables.items():
+        pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
+    conn.close()
+
+_bootstrap_db()
+
+# ── inject Streamlit secrets into env so existing model code finds the key ──
+import os
+if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+    os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
+
 from models.search import parse_query, search_players, get_player_detail
 from models.form import get_form_trend
 from models.value_scouting import get_undervalued
