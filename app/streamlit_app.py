@@ -793,6 +793,15 @@ with tab2:
                 except Exception:
                     _ci_m, _rmse_val = 0.0, 0.0
 
+                _ci_kwargs = {}
+                if _ci_m > 0:
+                    _ci_kwargs["error_y"] = dict(
+                        type="data",
+                        array=[float(_ci_m)],
+                        arrayminus=[float(min(float(_ci_m), float(predict) * 0.9))],
+                        color="#aaa", thickness=2, width=6,
+                    )
+
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(
                     name="Actual market value",
@@ -802,15 +811,12 @@ with tab2:
                     width=0.3,
                 ))
                 fig_bar.add_trace(go.Bar(
-                    name=f"Model estimate (±1σ CI)",
+                    name="Model estimate (±1σ CI)",
                     x=["Value comparison"],
                     y=[predict],
                     marker_color="#7EF7A8",
                     width=0.3,
-                    error_y=dict(
-                        type="data", array=[float(_ci_m)], arrayminus=[float(min(_ci_m, predict * 0.9))],
-                        visible=bool(_ci_m > 0), color="#aaa", thickness=2, width=6,
-                    ),
+                    **_ci_kwargs,
                 ))
                 fig_bar.update_layout(
                     barmode="group", height=300,
