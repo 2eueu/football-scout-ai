@@ -4,6 +4,7 @@ Value Scouting — 저평가 선수 발굴
 2. FBref 가중 평균 스탯 피처 엔지니어링
 3. XGBoost 회귀로 "퍼포먼스 기반 적정 몸값" 예측
 4. 실제 몸값 vs 예측 몸값 → 저평가/고평가 분류
+5. 나이 통제 잔차 (performance_premium), 리그 보정 계수
 """
 
 import re
