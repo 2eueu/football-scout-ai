@@ -184,6 +184,71 @@ def get_form_trend(player_name: str) -> dict:
     }
 
 
+SEASON_LABELS = {"2223": "22-23", "2324": "23-24", "2425": "24-25", "2526": "25-26"}
+
+
+def get_season_trend(player_name: str) -> dict:
+    """
+    players_raw 시즌별 스탯으로 퍼포먼스 추세 반환 (전체 선수 커버).
+    반환:
+      has_data     — 시즌 데이터 존재 여부
+      seasons      — ["22-23", "23-24", ...]
+      gls_p90      — 시즌별 골/90
+      ast_p90      — 시즌별 어시스트/90
+      g_a_p90      — 시즌별 공격포인트/90
+      sh_90        — 시즌별 슈팅/90
+      minutes      — 시즌별 출전 분
+      trend        — "상승 ↑" | "하락 ↓" | "안정 →"
+    """
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        """SELECT season, playing_time_min, per_90_minutes_gls, per_90_minutes_ast,
+                  per_90_minutes_g_a, standard_sh_90
+           FROM players_raw
+           WHERE player = ?
+           ORDER BY season ASC""",
+        conn, params=[player_name]
+    )
+    conn.close()
+
+    if df.empty:
+        return {"has_data": False, "player": player_name}
+
+    for col in ["playing_time_min", "per_90_minutes_gls", "per_90_minutes_ast",
+                "per_90_minutes_g_a", "standard_sh_90"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df = df[df["playing_time_min"] >= 90].copy()
+    if df.empty:
+        return {"has_data": False, "player": player_name}
+
+    df["season_label"] = df["season"].map(SEASON_LABELS).fillna(df["season"])
+
+    gls = df["per_90_minutes_gls"].tolist()
+    if len(gls) >= 2:
+        slope = float(np.polyfit(range(len(gls)), gls, 1)[0])
+        if slope > 0.05:
+            trend = "상승 ↑"
+        elif slope < -0.05:
+            trend = "하락 ↓"
+        else:
+            trend = "안정 →"
+    else:
+        trend = "안정 →"
+
+    return {
+        "has_data": True,
+        "player": player_name,
+        "seasons": df["season_label"].tolist(),
+        "gls_p90": df["per_90_minutes_gls"].round(2).tolist(),
+        "ast_p90": df["per_90_minutes_ast"].round(2).tolist(),
+        "g_a_p90": df["per_90_minutes_g_a"].round(2).tolist(),
+        "sh_90":   df["standard_sh_90"].round(2).tolist(),
+        "minutes": df["playing_time_min"].astype(int).tolist(),
+        "trend": trend,
+    }
+
+
 if __name__ == "__main__":
     train()
     result = get_form_trend("Lionel Andrés Messi Cuccittini")

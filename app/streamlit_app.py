@@ -20,6 +20,7 @@ def _bootstrap_db():
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
         "statsbomb_events": DATA / "statsbomb_events.parquet",
+        "players_raw":      DATA / "players_raw.parquet",
     }
     missing = [name for name, path in tables.items() if not path.exists()]
     if missing:
@@ -38,7 +39,7 @@ if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
     os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
 
 from models.search import parse_query, search_players, get_player_detail
-from models.form import get_form_trend
+from models.form import get_form_trend, get_season_trend
 from models.value_scouting import get_undervalued
 
 st.set_page_config(
@@ -200,13 +201,13 @@ with tab1:
 
             # 폼 트렌드
             st.divider()
-            st.subheader("폼 트렌드 (LSTM)")
             with st.spinner("폼 분석 중..."):
                 form = get_form_trend(detail_name)
+                season_data = get_season_trend(detail_name)
 
-            if not form.get("has_data"):
-                st.info("StatsBomb 이벤트 데이터가 없는 선수입니다.")
-            else:
+            if form.get("has_data"):
+                # StatsBomb 경기별 LSTM 폼
+                st.subheader("폼 트렌드 (LSTM — 경기별)")
                 t1, t2, t3 = st.columns(3)
                 t1.metric("트렌드", form["trend"])
                 t2.metric("최근 5경기 기울기", form["slope"])
@@ -242,6 +243,47 @@ with tab1:
                 fig2.update_yaxes(gridcolor="#333")
                 st.plotly_chart(fig2, use_container_width=True)
                 st.caption("폼 스코어 = 슈팅×2 + 드리블×1.5 + 태클×1 + 인터셉트×1 + 압박×0.5 + 패스×0.3")
+
+            if season_data.get("has_data"):
+                st.subheader("멀티시즌 퍼포먼스 추세 (22-23 ~ 25-26)")
+                s1, s2 = st.columns(2)
+                with s1:
+                    st.metric("트렌드", season_data["trend"])
+                with s2:
+                    seasons_str = " → ".join(season_data["seasons"])
+                    st.caption(f"시즌: {seasons_str}")
+
+                fig3 = go.Figure()
+                fig3.add_trace(go.Scatter(
+                    x=season_data["seasons"], y=season_data["gls_p90"],
+                    mode="lines+markers", name="골/90",
+                    line=dict(color="#7EB8F7", width=2), marker=dict(size=8),
+                ))
+                fig3.add_trace(go.Scatter(
+                    x=season_data["seasons"], y=season_data["ast_p90"],
+                    mode="lines+markers", name="어시스트/90",
+                    line=dict(color="#F7C97E", width=2), marker=dict(size=8),
+                ))
+                fig3.add_trace(go.Scatter(
+                    x=season_data["seasons"], y=season_data["g_a_p90"],
+                    mode="lines+markers", name="공격포인트/90",
+                    line=dict(color="#7EF7A8", width=2, dash="dot"), marker=dict(size=6),
+                ))
+                fig3.update_layout(
+                    xaxis_title="시즌", yaxis_title="per 90분", height=320,
+                    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    font_color="#ffffff", legend=dict(orientation="h", y=-0.25),
+                    margin=dict(t=20, b=70),
+                )
+                fig3.update_xaxes(gridcolor="#333")
+                fig3.update_yaxes(gridcolor="#333")
+                st.plotly_chart(fig3, use_container_width=True)
+
+                min_data = dict(zip(season_data["seasons"], season_data["minutes"]))
+                st.caption("출전: " + "  |  ".join(f"{s}: {m}분" for s, m in min_data.items()))
+
+            elif not form.get("has_data"):
+                st.info("트렌드 데이터가 없는 선수입니다.")
 
 
 # ════════════════════════════════════════════════════════════
