@@ -36,48 +36,55 @@ TM_LEAGUES = {
 
 # ── Transfermarkt 크롤링 ──────────────────────────────────────
 
-def _scrape_tm_league(league_id: str, league_slug: str) -> list[dict]:
-    url = f"https://www.transfermarkt.com/{league_slug}/marktwerte/wettbewerb/{league_id}"
+def _get_league_teams(league_id: str, league_slug: str) -> dict:
+    """Return {team_id: team_slug} for all teams in the league."""
+    url = f"https://www.transfermarkt.com/{league_slug}/startseite/wettbewerb/{league_id}/saison_id/2025"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return {}
+        soup = BeautifulSoup(r.text, "lxml")
+        teams = {}
+        for a in soup.find_all("a", href=re.compile(r"/startseite/verein/\d+")):
+            href = a.get("href", "")
+            m = re.match(r"^/([^/]+)/startseite/verein/(\d+)", href)
+            if m:
+                teams[m.group(2)] = m.group(1)  # {team_id: slug}
+        return teams
+    except Exception as e:
+        print(f"  [TM] league teams error for {league_slug}: {e}")
+        return {}
+
+
+def _scrape_team_squad(team_id: str, team_slug: str, league_name: str) -> list[dict]:
+    """Scrape market values for all players in a team squad."""
+    url = f"https://www.transfermarkt.com/{team_slug}/kader/verein/{team_id}/saison_id/2025"
     records = []
-    page = 1
-
-    while page <= 20:
-        try:
-            r = requests.get(
-                url, headers=HEADERS,
-                params={"ajax": "yw1", "page": page},
-                timeout=15
-            )
-            if r.status_code != 200:
-                break
-
-            soup = BeautifulSoup(r.text, "lxml")
-            rows = soup.select("table.items tbody tr:not(.spacer):not(.bg_blau_20)")
-            if not rows:
-                break
-
-            for row in rows:
-                try:
-                    name_el = row.select_one("td.hauptlink a")
-                    val_el  = row.select_one("td.rechts.hauptlink")
-                    pos_el  = row.select_one("td:nth-child(2) tr:nth-child(2) td")
-                    if not name_el or not val_el:
-                        continue
-                    records.append({
-                        "player_tm": name_el.text.strip(),
-                        "market_value_eur": _parse_value(val_el.text.strip()),
-                        "position_tm": pos_el.text.strip() if pos_el else None,
-                    })
-                except Exception:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return []
+        soup = BeautifulSoup(r.text, "lxml")
+        rows = soup.select("table.items tr.odd, table.items tr.even")
+        for row in rows:
+            try:
+                name_el = row.select_one("td.hauptlink a")
+                val_el  = row.select_one("td.rechts.hauptlink")
+                if not name_el or not val_el:
                     continue
-
-            page += 1
-            time.sleep(1.2)
-
-        except Exception as e:
-            print(f"  [TM] page {page} 실패: {e}")
-            break
-
+                name = name_el.text.strip()
+                val  = _parse_value(val_el.text.strip())
+                if val <= 0 or not name:
+                    continue
+                records.append({
+                    "player_tm":       name,
+                    "market_value_eur": val,
+                    "league":          league_name,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  [TM] squad error {team_slug}: {e}")
     return records
 
 
@@ -96,14 +103,29 @@ def _parse_value(text: str) -> float:
 
 
 def fetch_market_values() -> pd.DataFrame:
+    """Scrape market values via squad pages for full coverage (~25 players/team)."""
     all_records = []
+    seen_global: set = set()
+
     for fbref_name, (league_id, slug) in TM_LEAGUES.items():
-        print(f"  [TM] {fbref_name} 수집 중...")
-        rows = _scrape_tm_league(league_id, slug)
-        for r in rows:
-            r["league"] = fbref_name
-        all_records.extend(rows)
-        print(f"  [TM] {fbref_name} 완료: {len(rows)}명")
+        print(f"  [TM] {fbref_name} — fetching teams...")
+        teams = _get_league_teams(league_id, slug)
+        print(f"  [TM] {fbref_name} — {len(teams)} teams found")
+        time.sleep(1)
+
+        league_count = 0
+        for team_id, team_slug in teams.items():
+            rows = _scrape_team_squad(team_id, team_slug, fbref_name)
+            for row in rows:
+                key = (row["player_tm"].lower().strip(), fbref_name)
+                if key in seen_global:
+                    continue
+                seen_global.add(key)
+                all_records.append(row)
+                league_count += 1
+            time.sleep(1.2)
+
+        print(f"  [TM] {fbref_name} 완료: {league_count}명")
         time.sleep(2)
 
     df = pd.DataFrame(all_records)
@@ -111,7 +133,7 @@ def fetch_market_values() -> pd.DataFrame:
         conn = sqlite3.connect(DB_PATH)
         df.to_sql("market_values", conn, if_exists="replace", index=False)
         conn.close()
-        print(f"\n[DB] market_values 저장: {len(df)}명")
+        print(f"\n[DB] market_values 저장: {len(df)}명 ({df['player_tm'].nunique()} unique)")
     return df
 
 
@@ -141,6 +163,7 @@ POS_FEATURES = {
     "GK": ["age", "seasons_count", "playing_time_min"],
 }
 
+# Position-agnostic fallback (used by report.py)
 RADAR_STATS = {
     "Goals/90":      "per_90_minutes_gls",
     "xG/90":         "xg_p90",
@@ -150,6 +173,50 @@ RADAR_STATS = {
     "G+A/90":        "per_90_minutes_g_a",
     "Tackles":       "performance_tklw",
     "Interceptions": "performance_int",
+}
+
+# Position-specific radar definitions
+POS_RADAR_STATS = {
+    "FW": {
+        "Goals/90":    "per_90_minutes_gls",
+        "xG/90":       "xg_p90",
+        "npxG/90":     "npxg_p90",
+        "Shots/90":    "standard_sh_90",
+        "SoT/90":      "standard_sot_90",
+        "Assists/90":  "per_90_minutes_ast",
+        "xA/90":       "xa_p90",
+        "G+A/90":      "per_90_minutes_g_a",
+    },
+    "MF": {
+        "xA/90":         "xa_p90",
+        "Assists/90":    "per_90_minutes_ast",
+        "xG/90":         "xg_p90",
+        "Goals/90":      "per_90_minutes_gls",
+        "Tackles Won":   "performance_tklw",
+        "Interceptions": "performance_int",
+        "Fouls Drawn":   "performance_fld",
+        "G+A/90":        "per_90_minutes_g_a",
+    },
+    "DF": {
+        "Tackles Won":   "performance_tklw",
+        "Interceptions": "performance_int",
+        "Fouls Drawn":   "performance_fld",
+        "xG/90":         "xg_p90",
+        "xA/90":         "xa_p90",
+        "Goals/90":      "per_90_minutes_gls",
+        "Assists/90":    "per_90_minutes_ast",
+        "G+A/90":        "per_90_minutes_g_a",
+    },
+    "GK": {
+        "Goals/90":      "per_90_minutes_gls",
+        "xG/90":         "xg_p90",
+        "Assists/90":    "per_90_minutes_ast",
+        "xA/90":         "xa_p90",
+        "Shots/90":      "standard_sh_90",
+        "G+A/90":        "per_90_minutes_g_a",
+        "Tackles":       "performance_tklw",
+        "Interceptions": "performance_int",
+    },
 }
 
 
@@ -196,18 +263,31 @@ def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
     from sklearn.model_selection import cross_val_score
 
     train_df = train_df.copy()
+    # age² captures the non-linear value peak around mid-20s
+    if "age" in train_df.columns and "age_sq" not in feat_cols:
+        train_df["age_sq"] = train_df["age"] ** 2
+        feat_cols = feat_cols + ["age_sq"]
+
     train_df["log_value"] = np.log1p(train_df["market_value_eur"])
     X = train_df[feat_cols].fillna(0)
     y = train_df["log_value"]
 
     model = XGBRegressor(
-        n_estimators=300, max_depth=5, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0,
+        n_estimators=500,
+        max_depth=4,
+        learning_rate=0.03,
+        subsample=0.8,
+        colsample_bytree=0.7,
+        min_child_weight=5,   # prevents overfitting on rare high-value players
+        reg_alpha=0.1,        # L1
+        reg_lambda=2.0,       # L2
+        random_state=42,
+        verbosity=0,
     )
     model.fit(X, y)
 
     if len(train_df) >= 10:
-        cv = cross_val_score(model, X, y, cv=min(5, len(train_df)//5),
+        cv = cross_val_score(model, X, y, cv=min(5, len(train_df) // 5),
                              scoring="neg_root_mean_squared_error")
         print(f"  CV RMSE: {-cv.mean():.4f} ± {cv.std():.4f}  (n={len(train_df)})")
 
@@ -239,13 +319,16 @@ def train_value_model(df: pd.DataFrame):
 
 def predict_values(df: pd.DataFrame, models: dict) -> pd.DataFrame:
     df = df.copy()
+    if "age" in df.columns:
+        df["age_sq"] = pd.to_numeric(df["age"], errors="coerce").fillna(25) ** 2
     df["predicted_value_eur"] = np.nan
 
     for pos, (model, feat_cols) in models.items():
         mask = df["pos_group"] == pos
         if not mask.any():
             continue
-        X = df.loc[mask, feat_cols].fillna(0)
+        present = [c for c in feat_cols if c in df.columns]
+        X = df.loc[mask, present].fillna(0)
         df.loc[mask, "predicted_value_eur"] = np.expm1(model.predict(X))
 
     # Fallback: players whose position had no model → use median predicted
@@ -284,13 +367,40 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     if tm.empty:
         raise RuntimeError("Transfermarkt 데이터 없음")
 
-    tm["player_key"] = tm["player_tm"].str.lower().str.strip()
-    master["player_key"] = master["player"].str.lower().str.strip()
+    import unicodedata
 
+    def _norm(s: str) -> str:
+        s = unicodedata.normalize("NFKD", str(s).lower().strip())
+        return "".join(c for c in s if not unicodedata.combining(c))
+
+    tm["player_key"] = tm["player_tm"].apply(_norm)
+    master["player_key"] = master["player"].apply(_norm)
+
+    # Exact (normalised) match first
     merged = master.merge(
-        tm[["player_key", "market_value_eur"]],
+        tm[["player_key", "market_value_eur"]].drop_duplicates("player_key"),
         on="player_key", how="left",
     )
+
+    # Fuzzy fallback for unmatched players
+    unmatched_mask = merged["market_value_eur"].isna()
+    unmatched_count = unmatched_mask.sum()
+    if unmatched_count > 0:
+        try:
+            from rapidfuzz import process, fuzz
+            tm_keys = tm["player_key"].unique().tolist()
+            tm_val_map = tm.drop_duplicates("player_key").set_index("player_key")["market_value_eur"].to_dict()
+            unmatched_keys = merged.loc[unmatched_mask, "player_key"].tolist()
+            fuzzy_vals = []
+            for key in unmatched_keys:
+                match, score, _ = process.extractOne(key, tm_keys, scorer=fuzz.token_sort_ratio)
+                fuzzy_vals.append(tm_val_map.get(match, 0) if score >= 88 else 0)
+            merged.loc[unmatched_mask, "market_value_eur"] = fuzzy_vals
+            fuzzy_matched = sum(v > 0 for v in fuzzy_vals)
+            print(f"[매칭] 퍼지 매칭 추가: {fuzzy_matched}명")
+        except ImportError:
+            pass
+
     merged["market_value_eur"] = pd.to_numeric(
         merged["market_value_eur"], errors="coerce"
     ).fillna(0)
@@ -304,6 +414,17 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     models = train_value_model(df)
 
     result = predict_values(df, models)
+
+    # Save feature importances
+    fi_records = []
+    for pos, (model, feat_cols) in models.items():
+        importances = model.feature_importances_
+        for feat, imp in sorted(zip(feat_cols, importances), key=lambda x: -x[1]):
+            fi_records.append({"pos_group": pos, "feature": feat, "importance": float(imp)})
+    if fi_records:
+        conn = sqlite3.connect(DB_PATH)
+        pd.DataFrame(fi_records).to_sql("feature_importance", conn, if_exists="replace", index=False)
+        conn.close()
 
     save_cols = ["player", "team", "league", "pos", "age",
                  "market_value_eur", "predicted_value_eur", "undervalue_score",
@@ -460,12 +581,154 @@ def get_similar_players(
     })
 
 
+# ── 팀 피트 스코어링 ──────────────────────────────────────────
+
+TEAM_FIT_FEATURES = [
+    "per_90_minutes_gls", "per_90_minutes_ast", "per_90_minutes_g_a",
+    "xg_p90", "xa_p90", "standard_sh_90", "standard_sot_90",
+    "performance_tklw", "performance_int", "performance_fld",
+]
+
+
+def get_team_fit_players(
+    target_team: str,
+    position: str = None,
+    max_value_eur: float = None,
+    top_n: int = 15,
+) -> pd.DataFrame:
+    """
+    Find players whose stats best fit a target team's playing style.
+    Team DNA = mean of tactical features for same-position players already on that team.
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.preprocessing import StandardScaler
+
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    try:
+        vs = pd.read_sql(
+            "SELECT player, market_value_eur, undervalue_score FROM value_scouting WHERE market_value_eur > 0",
+            conn,
+        )
+    except Exception:
+        vs = pd.DataFrame()
+    conn.close()
+
+    master = master.drop_duplicates("player")
+    master["pos_group"] = master["pos"].apply(_pos_group)
+    if not vs.empty:
+        vs = vs.drop_duplicates("player")
+
+    feat_cols = [c for c in TEAM_FIT_FEATURES if c in master.columns]
+    for col in feat_cols:
+        master[col] = pd.to_numeric(master[col], errors="coerce").fillna(0)
+
+    # Merge market values
+    if not vs.empty:
+        master = master.merge(vs, on="player", how="left")
+    else:
+        master["market_value_eur"] = 0
+        master["undervalue_score"] = np.nan
+
+    # Filter position if given
+    pos_groups = []
+    if position:
+        p = position.upper()
+        if "FW" in p: pos_groups = ["FW"]
+        elif "MF" in p: pos_groups = ["MF"]
+        elif "DF" in p: pos_groups = ["DF"]
+        elif "GK" in p: pos_groups = ["GK"]
+    if not pos_groups:
+        pos_groups = ["FW", "MF", "DF"]
+
+    results = []
+    for pg in pos_groups:
+        team_players = master[(master["team"] == target_team) & (master["pos_group"] == pg)]
+        if team_players.empty:
+            continue
+
+        # Team DNA: mean stats of current players in this position group
+        team_dna = team_players[feat_cols].mean().values.reshape(1, -1)
+
+        # Candidates: all players NOT on this team, same position group
+        candidates = master[(master["team"] != target_team) & (master["pos_group"] == pg)].copy()
+        if max_value_eur:
+            candidates = candidates[candidates["market_value_eur"] <= max_value_eur]
+
+        if candidates.empty:
+            continue
+
+        X = candidates[feat_cols].values
+        scaler = StandardScaler()
+        # Fit on all players for this position group for consistent scaling
+        all_pos = master[master["pos_group"] == pg][feat_cols].values
+        scaler.fit(all_pos)
+
+        X_scaled = scaler.transform(X)
+        dna_scaled = scaler.transform(team_dna)
+
+        sims = cosine_similarity(dna_scaled, X_scaled)[0]
+        candidates = candidates.copy()
+        candidates["fit_score"] = sims
+        candidates["fit_pct"] = (sims * 100).round(1)
+        results.append(candidates)
+
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.concat(results, ignore_index=True)
+    df = df.drop_duplicates("player")
+    df = df.sort_values("fit_score", ascending=False).head(top_n)
+
+    df["market_value_m"] = (df["market_value_eur"].fillna(0) / 1e6).round(1)
+    df["age_int"] = df["age"].astype(str).str.split("-").str[0]
+    df["age_int"] = pd.to_numeric(df["age_int"], errors="coerce").fillna(0).astype(int)
+
+    out_cols = ["player", "team", "league", "pos", "age_int",
+                "market_value_m", "undervalue_score", "fit_pct",
+                "per_90_minutes_gls", "per_90_minutes_ast", "xg_p90", "xa_p90"]
+    out_cols = [c for c in out_cols if c in df.columns]
+    return df[out_cols].rename(columns={
+        "age_int":            "age",
+        "market_value_m":     "Value (M€)",
+        "undervalue_score":   "Undervalue (%)",
+        "fit_pct":            "Fit Score (%)",
+        "per_90_minutes_gls": "Goals/90",
+        "per_90_minutes_ast": "Assists/90",
+        "xg_p90":             "xG/90",
+        "xa_p90":             "xA/90",
+    })
+
+
+def get_all_teams() -> list[str]:
+    """Return sorted list of all team names in the DB."""
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql("SELECT DISTINCT team FROM players_master WHERE team IS NOT NULL ORDER BY team", conn)
+    conn.close()
+    return df["team"].tolist()
+
+
+def get_feature_importance(pos_group: str) -> pd.DataFrame:
+    """Return feature importances for a position model, sorted descending."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql(
+            "SELECT feature, importance FROM feature_importance WHERE pos_group = ? ORDER BY importance DESC",
+            conn, params=[pos_group],
+        )
+    except Exception:
+        df = pd.DataFrame(columns=["feature", "importance"])
+    conn.close()
+    return df
+
+
 # ── 퍼센타일 레이더 ────────────────────────────────────────────
 
 def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
     """
-    Returns 0-100 percentile ranks for each player within their position group.
-    Columns: player + one column per RADAR_STATS key.
+    Returns 0-100 percentile ranks using position-specific radar stats.
+    Columns: player, pos_group + one column per POS_RADAR_STATS[pos_group] key.
+    Players with different positions may have different column sets.
     """
     from scipy.stats import percentileofscore
 
@@ -476,8 +739,11 @@ def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
     master = master.drop_duplicates("player")
     master["pos_group"] = master["pos"].apply(_pos_group)
 
-    for col in RADAR_STATS.values():
-        master[col] = pd.to_numeric(master.get(col, 0), errors="coerce").fillna(0)
+    # Pre-cast all possible stat columns
+    all_cols = set(c for stats in POS_RADAR_STATS.values() for c in stats.values())
+    for col in all_cols:
+        if col in master.columns:
+            master[col] = pd.to_numeric(master[col], errors="coerce").fillna(0)
 
     records = []
     for name in player_names:
@@ -489,10 +755,14 @@ def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
         row = row.iloc[0]
         pg = row["pos_group"]
         peers = master[master["pos_group"] == pg]
+        radar = POS_RADAR_STATS.get(pg, RADAR_STATS)
 
         rec = {"player": row["player"], "pos_group": pg}
-        for label, col in RADAR_STATS.items():
-            rec[label] = round(percentileofscore(peers[col].values, row[col], kind="rank"), 1)
+        for label, col in radar.items():
+            if col in peers.columns:
+                rec[label] = round(percentileofscore(peers[col].values, row[col], kind="rank"), 1)
+            else:
+                rec[label] = 0.0
         records.append(rec)
 
     return pd.DataFrame(records)

@@ -327,6 +327,102 @@ def build_weighted_master() -> None:
     print(f"[통합] players_master 완성: {len(master)}명, {len(master.columns)}컬럼")
 
 
+# ── 패싱 스탯 수집 & 병합 ─────────────────────────────────────
+
+def enrich_passing_stats(seasons: list = None) -> None:
+    """
+    Collect FBref passing table for each season, build weighted averages,
+    and merge prgp_p90 / xag_p90 / kp_p90 / ppa_p90 / pass_cmp_pct into players_master.
+
+    NOTE: FBref passing page requires soccerdata support for 'passing' stat_type
+    (not yet available in v1.9.0) or direct scraping (blocked by rate limits).
+    Currently, xa_p90 from Understat covers 81.3% of players as a proxy.
+    """
+    if seasons is None:
+        seasons = SEASONS
+
+    print("[Passing] Collecting FBref passing stats...")
+    all_frames = []
+    for season in seasons:
+        df = fetch_fbref_stat("passing", season)
+        if df.empty:
+            continue
+        df["season"] = season
+        all_frames.append(df)
+        detected = [c for c in df.columns if any(x in c for x in ["prgp", "xag", "kp", "ppa", "cmp"])][:8]
+        print(f"  {season}: {len(df)} rows | passing cols: {detected}")
+
+    if not all_frames:
+        print("[Passing] No data collected — skipping")
+        return
+
+    raw = pd.concat(all_frames, ignore_index=True)
+    raw["weight"] = raw["season"].map(SEASON_WEIGHTS).fillna(0.1)
+
+    prgp_col  = next((c for c in raw.columns if "prgp" in c), None)
+    xag_col   = next((c for c in raw.columns if "xag" in c and "chain" not in c), None)
+    kp_col    = next((c for c in raw.columns if c in ("kp",) or c.endswith("_kp")), None)
+    ppa_col   = next((c for c in raw.columns if c in ("ppa",) or c.endswith("_ppa")), None)
+    att_col   = next((c for c in raw.columns if "total_att" in c), None)
+    cmp_col   = next((c for c in raw.columns if "total_cmp" in c and "att" not in c), None)
+    nineties_col = next((c for c in raw.columns if c in ("90s", "playing_time_90s", "90s_playing_time")), None)
+
+    print(f"  Detected cols — prgp:{prgp_col} xag:{xag_col} kp:{kp_col} ppa:{ppa_col} att:{att_col} 90s:{nineties_col}")
+
+    for col in [prgp_col, xag_col, kp_col, ppa_col, cmp_col, att_col, nineties_col]:
+        if col and col in raw.columns:
+            raw[col] = pd.to_numeric(raw[col], errors="coerce").fillna(0)
+
+    records = []
+    for player, grp in raw.groupby("player"):
+        total_w = grp["weight"].sum()
+        if total_w == 0:
+            continue
+
+        def wavg(col):
+            if not col or col not in grp.columns:
+                return np.nan
+            vals = pd.to_numeric(grp[col], errors="coerce")
+            valid = vals.notna()
+            if not valid.any():
+                return np.nan
+            return float((vals[valid] * grp.loc[valid, "weight"]).sum()
+                         / grp.loc[valid, "weight"].sum())
+
+        nineties = max(wavg(nineties_col) or 0.0, 0.1)
+        rec = {"player": player}
+        if prgp_col:
+            rec["prgp_p90"] = round(wavg(prgp_col) / nineties, 3)
+        if xag_col:
+            rec["xag_p90"] = round(wavg(xag_col) / nineties, 4)
+        if kp_col:
+            rec["kp_p90"] = round(wavg(kp_col) / nineties, 3)
+        if ppa_col:
+            rec["ppa_p90"] = round(wavg(ppa_col) / nineties, 3)
+        if cmp_col and att_col:
+            att = wavg(att_col)
+            cmp = wavg(cmp_col)
+            rec["pass_cmp_pct"] = round(cmp / att * 100, 1) if att and att > 0 else np.nan
+        records.append(rec)
+
+    passing_df = pd.DataFrame(records)
+    new_cols = [c for c in passing_df.columns if c != "player"]
+    print(f"[Passing] Weighted averages for {len(passing_df)} players | new cols: {new_cols}")
+
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    for col in new_cols:
+        if col in master.columns:
+            master = master.drop(columns=[col])
+    master = master.merge(passing_df, on="player", how="left")
+    master.to_sql("players_master", conn, if_exists="replace", index=False)
+    conn.close()
+    print(f"[Passing] players_master updated: {len(master)} rows × {len(master.columns)} cols")
+
+    master.to_parquet(Path(__file__).parent / "players_master.parquet", index=False)
+    print("[Passing] players_master.parquet saved")
+
+
 # ── 메인 실행 ─────────────────────────────────────────────────
 
 SEASONS = ["2223", "2324", "2425", "2526"]

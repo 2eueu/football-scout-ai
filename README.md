@@ -1,73 +1,74 @@
 # ⚽ Football Scout AI
 
-> **AI-powered player scouting and market value analysis across Europe's Big 5 leagues**  
-> Multi-season data (2022–2026) · XGBoost value prediction · LSTM form trends · Natural language search
+> **AI-powered player scouting platform for Europe's Big 5 leagues**  
+> Multi-season weighted stats (22/23 – 25/26) · xG/xA from Understat · Position-specific XGBoost value model · Tactical role clustering · Percentile radar · PDF scout reports · Natural language search
 
-![Python](https://img.shields.io/badge/Python-3.12-blue)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.x-red)
-![XGBoost](https://img.shields.io/badge/XGBoost-regression-orange)
-![PyTorch](https://img.shields.io/badge/PyTorch-LSTM-ee4c2c)
+[![Python](https://img.shields.io/badge/Python-3.12-blue)](https://python.org)
+[![Streamlit](https://img.shields.io/badge/Streamlit-deployed-red)](https://football-scout-ai-kujc5juarc7gdz4vhwaapb.streamlit.app/)
+[![XGBoost](https://img.shields.io/badge/XGBoost-position--specific-orange)](https://xgboost.readthedocs.io)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
----
-
-## What This Does
-
-Football clubs spend hundreds of millions on transfers — often mispricing players whose statistical output tells a different story. This project builds a data pipeline and ML model to answer:
-
-> *"Given a player's multi-season performance profile, what should their market value be — and who is the market mispricing right now?"*
-
-**Three core features:**
-
-| Feature | Description |
-|---------|-------------|
-| 🔍 **Natural Language Search** | Ask in plain language — *"young pressing midfielder in the Bundesliga"* — and get ranked results |
-| 💰 **Value Scouting** | XGBoost model predicts fair market value from performance data; surfaces undervalued players |
-| 📈 **Form Trend (LSTM)** | Match-by-match form score with next-game prediction using PyTorch LSTM |
+**[→ Live Demo](https://football-scout-ai-kujc5juarc7gdz4vhwaapb.streamlit.app/)**
 
 ---
 
-## Key Findings
+## Overview
 
-Full analysis: [`REPORT.md`](./REPORT.md)
+Football clubs spend hundreds of millions on transfers — often mispricing players whose statistical profile tells a different story. This project builds an end-to-end data pipeline and ML system to answer three practical scouting questions:
 
-**Most undervalued players (sample, ≤ €30M budget):**
+1. **Who is the market undervaluing right now?** — XGBoost models trained separately per position predict performance-based fair value
+2. **Who plays like this player, but costs less?** — Cosine similarity over 12 normalised stats finds cheaper like-for-like replacements
+3. **How do I find players meeting specific criteria fast?** — Natural language search (Llama 3.3 70B via Groq) parses plain English or Korean into structured DB filters
 
-| Player | Club | Actual (M€) | Predicted (M€) | Undervalue |
-|--------|------|-------------|----------------|------------|
-| Óscar Mingueza | Celta Vigo | 18.0 | 24.1 | **+34%** |
-| Ritsu Doan | Frankfurt | 20.0 | 25.0 | **+25%** |
-| Yann Gboho | Toulouse | 15.0 | 18.6 | **+24%** |
-| Georges Mikautadze | Villarreal | 28.0 | 32.5 | **+16%** |
+**3,435 players · 5 leagues · 4 seasons · 21 ML features including xG/xA · 1,955 players with Transfermarkt valuations**
 
-**League pattern:** Ligue 1 and Bundesliga consistently offer better value than the Premier League, which carries a ~20% brand premium on average.
+---
+
+## Features
+
+| | Feature | Description |
+|---|---------|-------------|
+| 🔍 | **Natural Language Search** | *"clinical striker under 25 in Ligue 1"* — bilingual (EN/KR), parsed by Llama 3.3 into SQL filters; supports `sort_by: form`, `undervalue`, `goals`, `tackles` |
+| 💰 | **Value Scouting** | Separate XGBoost models per position (FW/MF/DF/GK); predicts log-market-value from 21 features; surfaces undervalued players via `(predicted − actual) / actual` |
+| 🎯 | **Similar Player Finder** | Cosine similarity over normalised stats (goals, xG, xA, tackles, interceptions + age/league tier); returns cheaper alternatives ranked by profile match |
+| 🕹️ | **Tactical Role Clustering** | K-means (k=6) within each position group — 20 role labels: *Target Forward*, *Box-to-Box*, *Ball-Playing CB*, etc. |
+| 📊 | **Percentile Radar** | 8-stat radar (Goals/90, xG/90, Assists/90, xA/90, Shots/90, G+A/90, Tackles, Interceptions) normalised vs same-position peers across Big 5 |
+| 📈 | **Multi-Season Form Trend** | Season-by-season G/A trajectory (22/23–25/26) for all 3,435 players; LSTM match-by-match prediction where StatsBomb event data is available |
+| 📄 | **PDF Scout Report** | One-click export: player header, percentile progress bars, market value assessment |
 
 ---
 
 ## Architecture
 
 ```
-football-scout-ai/
-├── data/
-│   └── pipeline.py          # FBref multi-season collection + weighted merge
-├── models/
-│   ├── search.py             # NL query parsing (Groq/Llama 3.3) + DB search
-│   ├── form.py               # LSTM form trend model (PyTorch)
-│   └── value_scouting.py     # Transfermarkt scraper + XGBoost value model
-├── app/
-│   └── streamlit_app.py      # Streamlit dashboard (2 tabs)
-├── REPORT.md                 # Full analysis writeup
-└── scout.db                  # SQLite (gitignored — run pipeline to generate)
-```
+Data Sources
+────────────
+FBref  (via soccerdata)        4 seasons x 5 leagues x 4 stat types
+Understat (via soccerdata)     xG, npxG, xA per player/season
+Transfermarkt (scraped)        Market valuations
+StatsBomb Open Data            Match event data
 
-**Data flow:**
-```
-FBref (4 seasons) ──┐
-                    ├──► Weighted avg ──► XGBoost ──► Undervalue score
-Transfermarkt ──────┘
+Pipeline
+────────
+FBref standard/shooting/misc ──► season-weighted merge ──► players_master (3,435 x 74 cols)
+Understat xG/xA ───────────────► name-normalised join  ──┘  (81% coverage)
 
-StatsBomb events ──► LSTM ──► Form trend + next-game prediction
+                    ┌── FW model (XGBoost, n=135) ──┐
+players_master  ────┼── MF model (XGBoost, n=161) ──┼──► predicted_value_eur
++ market values     ├── DF model (XGBoost, n=147) ──┤    undervalue_score
+                    └── GK model (XGBoost, n=20)  ──┘
 
-User query ──► Groq (Llama 3.3) ──► Structured filters ──► SQLite query
+players_master ──► K-means (k=6 per position) ──► 20 tactical role labels
+
+players_raw (11,390 season rows) ──► season trend charts
+StatsBomb events (1,071 rows)    ──► LSTM form prediction
+
+App Layer
+─────────
+query    ──► Groq Llama 3.3 70B ──► JSON filters ──► SQLite ──► ranked results
+player   ──► cosine_similarity(StandardScaler(12 stats)) ──► similar players
+player   ──► scipy percentileofscore vs position peers  ──► radar chart
+player   ──► fpdf2 layout ──► PDF bytes ──► download button
 ```
 
 ---
@@ -76,25 +77,37 @@ User query ──► Groq (Llama 3.3) ──► Structured filters ──► SQL
 
 ### Multi-Season Weighting
 
-Rather than using a single season snapshot, performance stats are weighted across four seasons:
+Stats are weighted across four seasons so recent form is prioritised without discarding career context:
 
-| Season | Weight | Reason |
-|--------|--------|--------|
+| Season | Weight | Rationale |
+|--------|--------|-----------|
 | 2022–23 | 15% | Historical baseline |
 | 2023–24 | 25% | Recent full season |
 | 2024–25 | 35% | Most recent complete |
-| 2025–26 | 25% | Current (in progress) |
+| 2025–26 | 25% | Current (partial) |
 
-Minimum 500 minutes per season required.
+Minimum 500 minutes per season required to include a season in the weighted average.
 
 ### Value Model
 
-- **Target:** `log(market_value + 1)` — log-transformed for variance stability
-- **Features:** 16 performance stats + age factor + league tier weights
-- **Model:** XGBoost Regressor (300 estimators, 5-fold CV RMSE: 0.465)
-- **Undervalue score:** `(predicted − actual) / actual × 100`
+| Attribute | Detail |
+|-----------|--------|
+| Target | `log1p(market_value_eur)` |
+| Models | 4 separate XGBoost regressors — one per position group |
+| Features | 21: age, seasons_count, playing_time, goals/ast per90, xG/xA/npxG per90, shots, tackles, interceptions, fouls, age_factor, league_tier |
+| Training data | 1,955 players with TM valuations (squad-page scraping, 5 leagues × ~20 teams × ~25 players) |
+| Validation | 5-fold CV RMSE (log): FW 0.69, MF 0.70, DF 0.77, GK 0.99 |
+| Undervalue | `(predicted - actual) / actual * 100` |
 
-See [`REPORT.md`](./REPORT.md) for full methodology.
+Position-specific training matters because value drivers differ sharply: finishing stats (xG, npxG) dominate for forwards, while defensive actions are stronger signals for defenders.
+
+### xG Integration
+
+Understat player season stats collected via `soccerdata.Understat` — no JS rendering required. Coverage: **81.3%** of 3,435 players matched after Unicode name normalisation. Three features added: `xg_p90`, `npxg_p90`, `xa_p90`.
+
+### Tactical Role Clustering
+
+K-means (k=6, n_init=10) on 10 standardised stats within each position group. Clusters are ranked by mean Goals/90 to assign consistent labels. 20 distinct role labels across all positions.
 
 ---
 
@@ -109,25 +122,26 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Environment variables
+### 2. Environment
 
 ```bash
 cp .env.example .env
-# Add your GROQ_API_KEY (free at console.groq.com)
+# Set GROQ_API_KEY  (free at console.groq.com — used for NL query parsing)
 ```
 
-### 3. Build the database
+### 3. Run
 
-```bash
-# Collect 4 seasons of FBref data + Transfermarkt values (~30 min)
-python data/pipeline.py
-python models/value_scouting.py
-```
-
-### 4. Run the app
+The app auto-bootstraps `scout.db` from the parquet files in `data/` on first run — **no separate pipeline step needed**.
 
 ```bash
 streamlit run app/streamlit_app.py
+```
+
+To rebuild data from scratch (requires `soccerdata` + `statsbombpy`):
+
+```bash
+python data/pipeline.py          # FBref multi-season collection (~30 min)
+python models/value_scouting.py  # Transfermarkt scrape + model training
 ```
 
 ---
@@ -136,41 +150,37 @@ streamlit run app/streamlit_app.py
 
 | Source | Data | Access |
 |--------|------|--------|
-| [FBref](https://fbref.com) | Player season stats (Big 5 leagues, 4 seasons) | Public via `soccerdata` |
+| [FBref](https://fbref.com) | Player season stats — standard, shooting, playing_time, misc (Big 5, 4 seasons) | Public via `soccerdata` |
+| [Understat](https://understat.com) | xG, npxG, xA, xG_chain per player/season | Public via `soccerdata.Understat` |
+| [Transfermarkt](https://transfermarkt.com) | Market valuations | Public (HTML scrape) |
 | [StatsBomb Open Data](https://github.com/statsbomb/open-data) | Match event data | Free / open |
-| [Transfermarkt](https://transfermarkt.com) | Market valuations | Public (scraped) |
 
 ---
 
-## Requirements
+## Stack
 
 ```
-soccerdata       # FBref data collection
-statsbombpy      # StatsBomb event data
-pandas / numpy   # Data processing
-xgboost          # Market value model
-torch            # LSTM form model
-scikit-learn     # Model validation
-streamlit        # Dashboard
-plotly           # Visualisations
-groq             # NL query parsing (Llama 3.3 70B)
-beautifulsoup4   # Transfermarkt scraping
+Data        pandas, numpy, soccerdata, beautifulsoup4
+ML          xgboost, scikit-learn, scipy
+DL          PyTorch (LSTM form model — optional, graceful fallback if unavailable)
+NLP         groq (Llama 3.3 70B) for NL query parsing
+Storage     SQLite, parquet (pyarrow)
+App         Streamlit, Plotly
+Export      fpdf2
 ```
 
 ---
 
 ## Limitations
 
-- Name matching between FBref and Transfermarkt is string-based (~8% unmatched)
-- No contract length data — expiring contracts deflate valuations independently of performance
-- Five broad position groups; position-specific models would improve precision
-- StatsBomb event data covers a limited set of competitions (La Liga 2020–21)
+- **Market value coverage**: Transfermarkt squad-page scraping covers ~1,955 of 3,435 players (56.9%); remaining players lack TM market valuations
+- **xG coverage**: 81.3% matched; remaining players have xG imputed as 0
+- **StatsBomb events**: Limited to open dataset competitions; LSTM form available for ~24 players only
+- **No contract data**: Expiring contracts depress market values independently of performance
 
 ---
 
 ## Author
 
-Built as part of a sports analytics portfolio targeting football club data roles.  
-Full analysis writeup: [`REPORT.md`](./REPORT.md)
-
-*Feedback and PRs welcome.*
+Built as a sports analytics portfolio targeting football club data analyst roles.  
+Full methodology writeup: [`REPORT.md`](./REPORT.md)

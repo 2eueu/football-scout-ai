@@ -16,7 +16,7 @@ def _bootstrap_db():
     DB = Path(__file__).parent.parent / "scout.db"
     DATA = Path(__file__).parent.parent / "data"
     # always_refresh: rebuilt locally before every push
-    always_refresh = {"players_master", "value_scouting", "player_roles"}
+    always_refresh = {"players_master", "value_scouting", "player_roles", "market_values"}
     tables = {
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
@@ -24,6 +24,7 @@ def _bootstrap_db():
         "players_raw":      DATA / "players_raw.parquet",
         "understat_xg":     DATA / "understat_xg.parquet",
         "player_roles":     DATA / "player_roles.parquet",
+        "market_values":    DATA / "market_values.parquet",
     }
 
     if not DB.exists():
@@ -95,9 +96,40 @@ from models.search import parse_query, search_players, get_player_detail
 from models.form import get_form_trend, get_season_trend
 from models.value_scouting import (
     get_undervalued, get_similar_players,
-    get_player_percentiles, get_player_role, RADAR_STATS,
+    get_player_percentiles, get_player_role, RADAR_STATS, POS_RADAR_STATS,
+    get_team_fit_players, get_all_teams, get_feature_importance,
 )
 from models.report import generate_scout_pdf
+
+
+def _build_radar(pct_df: pd.DataFrame, height: int = 380) -> go.Figure:
+    """Render a polar radar from get_player_percentiles() output.
+    Each player's row may have different column sets (position-specific labels).
+    """
+    fig = go.Figure()
+    for _, row in pct_df.iterrows():
+        pg = row.get("pos_group", "MF")
+        radar = POS_RADAR_STATS.get(pg, RADAR_STATS)
+        labels = list(radar.keys())
+        vals = [float(row.get(lbl, 0)) for lbl in labels]
+        vals_closed = vals + [vals[0]]
+        labels_closed = labels + [labels[0]]
+        fig.add_trace(go.Scatterpolar(
+            r=vals_closed, theta=labels_closed,
+            fill="toself", name=row["player"], opacity=0.75,
+        ))
+    fig.update_layout(
+        polar=dict(radialaxis=dict(
+            visible=True, range=[0, 100],
+            ticktext=["0", "25", "50", "75", "100"],
+            tickvals=[0, 25, 50, 75, 100],
+        )),
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        font_color="#ffffff", height=height,
+        legend=dict(orientation="h", y=-0.18),
+        margin=dict(t=30, b=60),
+    )
+    return fig
 
 st.set_page_config(
     page_title="Football Scout AI",
@@ -129,7 +161,7 @@ st.markdown(
 )
 st.divider()
 
-tab1, tab2 = st.tabs(["🔍 Player Search", "💰 Value Scouting"])
+tab1, tab2, tab3 = st.tabs(["🔍 Player Search", "💰 Value Scouting", "🎯 Team Fit"])
 
 
 # ════════════════════════════════════════════════════════════
@@ -203,28 +235,91 @@ with tab1:
 
         if len(selected) >= 2:
             pct_df = get_player_percentiles(selected)
-            labels = list(RADAR_STATS.keys())
-            colors = ["#7EB8F7", "#F7C97E", "#7EF7A8"]
-            fig = go.Figure()
-            for i, player in enumerate(selected):
-                row = pct_df[pct_df["player"] == player]
-                if row.empty:
-                    continue
-                vals = [row.iloc[0].get(lbl, 50) for lbl in labels]
-                fig.add_trace(go.Scatterpolar(
-                    r=vals + [vals[0]], theta=labels + [labels[0]],
-                    fill="toself", name=player,
-                    line_color=colors[i % 3], fillcolor=colors[i % 3], opacity=0.25,
-                ))
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100],
-                                           tickvals=[25, 50, 75, 100],
-                                           ticktext=["25th", "50th", "75th", "100th"])),
-                showlegend=True, height=450,
-                paper_bgcolor="#0e1117", font_color="#ffffff",
-                margin=dict(t=30, b=30),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            if not pct_df.empty:
+                st.plotly_chart(_build_radar(pct_df, height=450), use_container_width=True)
+
+            # Side-by-side stat comparison table
+            COMPARE_STATS = [
+                ("Goals/90",     "per_90_minutes_gls"),
+                ("xG/90",        "xg_p90"),
+                ("npxG/90",      "npxg_p90"),
+                ("Assists/90",   "per_90_minutes_ast"),
+                ("xA/90",        "xa_p90"),
+                ("G+A/90",       "per_90_minutes_g_a"),
+                ("Shots/90",     "standard_sh_90"),
+                ("SoT/90",       "standard_sot_90"),
+                ("Tackles Won",  "performance_tklw"),
+                ("Interceptions","performance_int"),
+                ("Fouls Drawn",  "performance_fld"),
+            ]
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                sel_df = pd.read_sql(
+                    f"SELECT * FROM players_master WHERE player IN ({','.join(['?']*len(selected))})",
+                    conn, params=selected,
+                )
+                vs_df = pd.read_sql(
+                    f"SELECT player, market_value_eur, predicted_value_eur, undervalue_score "
+                    f"FROM value_scouting WHERE player IN ({','.join(['?']*len(selected))})",
+                    conn, params=selected,
+                )
+                conn.close()
+
+                sel_df = sel_df.drop_duplicates("player").set_index("player")
+                vs_df  = vs_df.drop_duplicates("player").set_index("player")
+
+                comp_rows = []
+                for label, col in COMPARE_STATS:
+                    row = {"Metric": label}
+                    for p in selected:
+                        if p in sel_df.index and col in sel_df.columns:
+                            v = pd.to_numeric(sel_df.loc[p, col], errors="coerce")
+                            row[p] = round(float(v), 3) if pd.notna(v) else "—"
+                        else:
+                            row[p] = "—"
+                    comp_rows.append(row)
+
+                # Value rows
+                for label, col in [("Value (M€)", "market_value_eur"), ("Predicted (M€)", "predicted_value_eur"), ("Undervalue (%)", "undervalue_score")]:
+                    row = {"Metric": label}
+                    for p in selected:
+                        if p in vs_df.index:
+                            v = pd.to_numeric(vs_df.loc[p, col], errors="coerce")
+                            if col in ("market_value_eur", "predicted_value_eur"):
+                                row[p] = f"{v/1e6:.1f}" if pd.notna(v) and v > 0 else "—"
+                            else:
+                                row[p] = f"{v:+.1f}%" if pd.notna(v) else "—"
+                        else:
+                            row[p] = "—"
+                    comp_rows.append(row)
+
+                comp_table = pd.DataFrame(comp_rows).set_index("Metric")
+
+                st.divider()
+                st.subheader("Side-by-Side Comparison")
+                # Highlight the best value in each row (numeric only)
+                def highlight_best(row):
+                    styles = [""] * len(row)
+                    try:
+                        nums = [float(v) for v in row if str(v).replace(".","").replace("-","").replace("+","").isnumeric() or (isinstance(v, float) and not pd.isna(v))]
+                        if not nums: return styles
+                        best = max(nums)
+                        for i, v in enumerate(row):
+                            try:
+                                if float(v) == best:
+                                    styles[i] = "background-color: #1a3a1a; color: #7EF7A8; font-weight: bold"
+                            except (ValueError, TypeError):
+                                pass
+                    except Exception:
+                        pass
+                    return styles
+
+                st.dataframe(
+                    comp_table.style.apply(highlight_best, axis=1),
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.info(f"Comparison table unavailable: {e}")
 
         # ── Player detail ────────────────────────────────────
         st.divider()
@@ -275,28 +370,13 @@ with tab1:
                 xg_c2.metric("npxG/90", f"{_xg_row['npxg_p90']:.3f}")
                 xg_c3.metric("xA/90", f"{_xg_row['xa_p90']:.3f}")
 
-            # Percentile radar
+            # Percentile radar (position-specific)
             pct_df = get_player_percentiles([detail_name])
             if not pct_df.empty:
                 st.divider()
-                st.subheader("Percentile Profile (vs same position, Big 5)")
-                labels = list(RADAR_STATS.keys())
-                vals   = [pct_df.iloc[0].get(lbl, 50) for lbl in labels]
-                fig_pct = go.Figure()
-                fig_pct.add_trace(go.Scatterpolar(
-                    r=vals + [vals[0]], theta=labels + [labels[0]],
-                    fill="toself", name=detail_name,
-                    line_color="#7EB8F7", fillcolor="#7EB8F7", opacity=0.3,
-                ))
-                fig_pct.update_layout(
-                    polar=dict(radialaxis=dict(visible=True, range=[0, 100],
-                                               tickvals=[25, 50, 75, 100],
-                                               ticktext=["25th", "50th", "75th", "100th"])),
-                    showlegend=False, height=400,
-                    paper_bgcolor="#0e1117", font_color="#ffffff",
-                    margin=dict(t=30, b=30),
-                )
-                st.plotly_chart(fig_pct, use_container_width=True)
+                pg_label = pct_df.iloc[0].get("pos_group", "")
+                st.subheader(f"Percentile Profile — {pg_label} metrics vs Big 5 peers")
+                st.plotly_chart(_build_radar(pct_df, height=400), use_container_width=True)
 
             # PDF export
             st.divider()
@@ -588,6 +668,60 @@ with tab2:
                 fig_bar.update_yaxes(gridcolor="#222")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
+                # ── Feature importance for this position model ──
+                try:
+                    pos_grp = "MF"
+                    pos_raw = str(row.get("pos", ""))
+                    if "FW" in pos_raw.upper():   pos_grp = "FW"
+                    elif "DF" in pos_raw.upper(): pos_grp = "DF"
+                    elif "GK" in pos_raw.upper(): pos_grp = "GK"
+
+                    fi_df = get_feature_importance(pos_grp)
+                    if not fi_df.empty:
+                        st.divider()
+                        st.subheader(f"What Drives {pos_grp} Value? — Model Feature Importance")
+                        st.caption(f"XGBoost gain importance for the {pos_grp} position model (trained on {pos_grp} players with TM market values)")
+
+                        FEAT_LABELS = {
+                            "age": "Age", "age_factor": "Age Factor (peak multiplier)",
+                            "age_sq": "Age² (non-linear peak)", "league_tier": "League Tier",
+                            "seasons_count": "Seasons in Big 5", "playing_time_min": "Minutes Played",
+                            "playing_time_90s": "90s Played",
+                            "per_90_minutes_gls": "Goals/90", "per_90_minutes_ast": "Assists/90",
+                            "per_90_minutes_g_a": "G+A/90", "performance_gls": "Total Goals",
+                            "performance_ast": "Total Assists",
+                            "standard_sh_90": "Shots/90", "standard_sot_90": "SoT/90",
+                            "standard_g_sh": "Goals per Shot",
+                            "xg_p90": "xG/90", "npxg_p90": "npxG/90", "xa_p90": "xA/90",
+                            "performance_tklw": "Tackles Won", "performance_int": "Interceptions",
+                            "performance_fld": "Fouls Drawn", "performance_fls": "Fouls Committed",
+                            "performance_crdy": "Yellow Cards",
+                        }
+                        fi_df["label"] = fi_df["feature"].map(FEAT_LABELS).fillna(fi_df["feature"])
+                        fi_df = fi_df.sort_values("importance", ascending=True)
+
+                        fig_fi = go.Figure(go.Bar(
+                            x=fi_df["importance"],
+                            y=fi_df["label"],
+                            orientation="h",
+                            marker_color=[
+                                "#7EF7A8" if v >= fi_df["importance"].quantile(0.75)
+                                else "#7EB8F7" if v >= fi_df["importance"].quantile(0.40)
+                                else "#555"
+                                for v in fi_df["importance"]
+                            ],
+                        ))
+                        fig_fi.update_layout(
+                            height=max(300, len(fi_df) * 24),
+                            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                            font_color="#ffffff", xaxis_title="Importance (gain)",
+                            margin=dict(t=10, b=20, l=10, r=10),
+                        )
+                        fig_fi.update_xaxes(gridcolor="#222")
+                        st.plotly_chart(fig_fi, use_container_width=True)
+                except Exception:
+                    pass
+
                 # ── Similar player recommendations ────────────
                 st.divider()
                 st.subheader("Similar Players — Cheaper Alternatives")
@@ -619,3 +753,86 @@ with tab2:
                             "xA/90": st.column_config.NumberColumn("xA/90", format="%.3f"),
                         },
                     )
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 3 — Team Fit Scoring
+# ════════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("### Team Fit Scoring")
+    st.caption(
+        "Find players whose statistical profile best matches a target team's playing style. "
+        "Team DNA = mean tactical stats of current players in the same position group."
+    )
+
+    col_tf1, col_tf2, col_tf3, col_tf4 = st.columns([3, 2, 2, 2])
+
+    with col_tf1:
+        all_teams = get_all_teams()
+        selected_tf_team = st.selectbox(
+            "Target Team",
+            options=all_teams,
+            index=all_teams.index("Arsenal") if "Arsenal" in all_teams else 0,
+            key="tf_team",
+        )
+    with col_tf2:
+        tf_position = st.selectbox(
+            "Position Filter",
+            options=["All", "FW", "MF", "DF"],
+            key="tf_pos",
+        )
+    with col_tf3:
+        tf_budget = st.number_input(
+            "Max Value (M€)",
+            min_value=0.0, max_value=300.0, value=50.0, step=5.0,
+            key="tf_budget",
+        )
+    with col_tf4:
+        tf_topn = st.number_input("Top N", min_value=5, max_value=30, value=15, key="tf_topn")
+
+    if st.button("Find Team Fits", type="primary", key="tf_btn"):
+        with st.spinner(f"Analysing {selected_tf_team}'s DNA..."):
+            fit_df = get_team_fit_players(
+                target_team=selected_tf_team,
+                position=None if tf_position == "All" else tf_position,
+                max_value_eur=float(tf_budget) * 1_000_000 if tf_budget > 0 else None,
+                top_n=int(tf_topn),
+            )
+
+        if fit_df.empty:
+            st.warning(f"No fit results for {selected_tf_team}. Try a different position filter.")
+        else:
+            st.success(f"Top {len(fit_df)} players matching {selected_tf_team}'s style")
+            st.dataframe(
+                fit_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Fit Score (%)": st.column_config.ProgressColumn(
+                        "Fit Score (%)", min_value=0, max_value=100, format="%.1f%%"
+                    ),
+                    "Undervalue (%)": st.column_config.NumberColumn("Undervalue (%)", format="%.1f"),
+                    "Value (M€)": st.column_config.NumberColumn("Value (M€)", format="%.1f"),
+                    "Goals/90": st.column_config.NumberColumn("Goals/90", format="%.2f"),
+                    "Assists/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
+                    "xG/90": st.column_config.NumberColumn("xG/90", format="%.3f"),
+                    "xA/90": st.column_config.NumberColumn("xA/90", format="%.3f"),
+                },
+            )
+
+            # Radar comparison: team DNA vs top 3 fits
+            st.divider()
+            st.subheader(f"{selected_tf_team} DNA vs Top Fits")
+
+            fit_player_names = fit_df["player"].tolist()[:3]
+            conn = sqlite3.connect(DB_PATH)
+            team_dna_raw = pd.read_sql(
+                f"SELECT * FROM players_master WHERE team = ?",
+                conn, params=[selected_tf_team],
+            )
+            conn.close()
+
+            if not team_dna_raw.empty and fit_player_names:
+                pcts = get_player_percentiles(fit_player_names)
+                if not pcts.empty:
+                    st.plotly_chart(_build_radar(pcts, height=420), use_container_width=True)

@@ -12,3 +12,4 @@ beautifulsoup4
 lxml
 fpdf2
 scipy
+rapidfuzz
