@@ -423,6 +423,142 @@ def enrich_passing_stats(seasons: list = None) -> None:
     print("[Passing] players_master.parquet saved")
 
 
+def enrich_gk_stats() -> None:
+    """
+    Build season-weighted GK stat averages from players_keeper and merge into players_master.
+    Adds: gk_save_pct, gk_ga_p90, gk_cs_pct, gk_pksave_pct, gk_saves_p90, gk_win_pct
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        keeper = pd.read_sql("SELECT * FROM players_keeper", conn)
+        master = pd.read_sql("SELECT * FROM players_master", conn)
+    except Exception as e:
+        conn.close()
+        print(f"[GK] DB read error: {e}")
+        return
+    conn.close()
+
+    if keeper.empty:
+        print("[GK] no keeper data — skipping")
+        return
+
+    for col in ["performance_save", "performance_ga90", "performance_cs",
+                "penalty_kicks_save", "performance_saves",
+                "performance_w", "playing_time_mp", "playing_time_90s"]:
+        if col in keeper.columns:
+            keeper[col] = pd.to_numeric(keeper[col], errors="coerce")
+
+    keeper["weight"] = keeper["season"].map(SEASON_WEIGHTS).fillna(0.1)
+
+    def _wavg(grp: pd.DataFrame, col: str) -> float:
+        if col not in grp.columns:
+            return np.nan
+        vals = grp[col]
+        valid = vals.notna()
+        if not valid.any():
+            return np.nan
+        w = grp.loc[valid, "weight"]
+        return float((vals[valid] * w).sum() / w.sum())
+
+    records = []
+    for player, grp in keeper.groupby("player"):
+        total_mp   = grp["playing_time_mp"].sum()   if "playing_time_mp"   in grp.columns else 0
+        total_90s  = grp["playing_time_90s"].sum()  if "playing_time_90s"  in grp.columns else 0
+        total_cs   = grp["performance_cs"].sum()    if "performance_cs"    in grp.columns else 0
+        total_w    = grp["performance_w"].sum()     if "performance_w"     in grp.columns else 0
+        total_saves= grp["performance_saves"].sum() if "performance_saves" in grp.columns else 0
+
+        rec = {
+            "player":        player,
+            "gk_save_pct":   round(_wavg(grp, "performance_save"), 2),
+            "gk_ga_p90":     round(_wavg(grp, "performance_ga90"), 3),
+            "gk_pksave_pct": round(_wavg(grp, "penalty_kicks_save"), 2),
+            "gk_cs_pct":     round(total_cs   / total_mp   * 100, 1) if total_mp   > 0 else np.nan,
+            "gk_saves_p90":  round(total_saves / total_90s,       2) if total_90s  > 0 else np.nan,
+            "gk_win_pct":    round(total_w    / total_mp   * 100, 1) if total_mp   > 0 else np.nan,
+        }
+        records.append(rec)
+
+    gk_df = pd.DataFrame(records)
+    print(f"[GK] Computed stats for {len(gk_df)} goalkeepers")
+
+    gk_cols = [c for c in gk_df.columns if c != "player"]
+    for col in gk_cols:
+        if col in master.columns:
+            master = master.drop(columns=[col])
+    master = master.merge(gk_df, on="player", how="left")
+
+    conn = sqlite3.connect(DB_PATH)
+    master.to_sql("players_master", conn, if_exists="replace", index=False)
+    conn.close()
+
+    master.to_parquet(Path(__file__).parent / "players_master.parquet", index=False)
+    print(f"[GK] Merged GK stats into players_master ({len(gk_df)} GKs enriched)")
+    print("[GK] players_master.parquet saved")
+
+
+# League-normalized stat columns
+LEAGUE_ADJ_MAP = {
+    "per_90_minutes_gls": "adj_gls_p90",
+    "per_90_minutes_ast": "adj_ast_p90",
+    "per_90_minutes_g_a": "adj_g_a_p90",
+    "xg_p90":             "adj_xg_p90",
+    "xa_p90":             "adj_xa_p90",
+}
+
+
+def apply_league_adjustment() -> None:
+    """
+    Normalize goal/assist stats by each league's scoring difficulty.
+    adj_x = raw_x * (global_mean / league_mean)
+    Saves league_factors table and updates players_master with adj_* columns.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    conn.close()
+
+    outfield = master[~master["pos"].astype(str).str.upper().str.contains("GK", na=False)].copy()
+
+    factor_records = []
+    for raw_col, adj_col in LEAGUE_ADJ_MAP.items():
+        if raw_col not in master.columns:
+            continue
+        outfield[raw_col] = pd.to_numeric(outfield[raw_col], errors="coerce")
+        global_mean = outfield[raw_col].mean()
+        if global_mean == 0 or np.isnan(global_mean):
+            continue
+        league_means = outfield.groupby("league")[raw_col].mean()
+        factors = {lg: round(global_mean / lm, 4) if lm > 0 else 1.0
+                   for lg, lm in league_means.items()}
+
+        master[adj_col] = (
+            pd.to_numeric(master[raw_col], errors="coerce").fillna(0)
+            * master["league"].map(factors).fillna(1.0)
+        ).round(4)
+
+        for league, factor in factors.items():
+            factor_records.append({
+                "league": league,
+                "stat":   raw_col,
+                "league_mean": round(float(league_means.get(league, global_mean)), 4),
+                "global_mean": round(float(global_mean), 4),
+                "factor":      factor,
+            })
+
+        print(f"  {raw_col}: global={global_mean:.4f}  factors={factors}")
+
+    conn = sqlite3.connect(DB_PATH)
+    master.to_sql("players_master", conn, if_exists="replace", index=False)
+    if factor_records:
+        pd.DataFrame(factor_records).to_sql("league_factors", conn,
+                                            if_exists="replace", index=False)
+        print(f"[LeagueAdj] league_factors saved ({len(factor_records)} rows)")
+    conn.close()
+
+    master.to_parquet(Path(__file__).parent / "players_master.parquet", index=False)
+    print("[LeagueAdj] players_master updated with adj_* stats and parquet saved")
+
+
 # ── 메인 실행 ─────────────────────────────────────────────────
 
 SEASONS = ["2223", "2324", "2425", "2526"]

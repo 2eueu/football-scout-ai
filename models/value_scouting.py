@@ -160,7 +160,8 @@ POS_FEATURES = {
         "performance_crdy", "per_90_minutes_g_a",
         "standard_sh_90", "xg_p90", "xa_p90",
     ],
-    "GK": ["age", "seasons_count", "playing_time_min"],
+    "GK": ["age", "seasons_count", "playing_time_min",
+           "gk_save_pct", "gk_ga_p90", "gk_cs_pct", "gk_saves_p90"],
 }
 
 # Position-agnostic fallback (used by report.py)
@@ -208,16 +209,17 @@ POS_RADAR_STATS = {
         "G+A/90":        "per_90_minutes_g_a",
     },
     "GK": {
-        "Goals/90":      "per_90_minutes_gls",
-        "xG/90":         "xg_p90",
-        "Assists/90":    "per_90_minutes_ast",
-        "xA/90":         "xa_p90",
-        "Shots/90":      "standard_sh_90",
-        "G+A/90":        "per_90_minutes_g_a",
-        "Tackles":       "performance_tklw",
-        "Interceptions": "performance_int",
+        "Save %":        "gk_save_pct",
+        "GA/90":         "gk_ga_p90",
+        "Clean Sheet %": "gk_cs_pct",
+        "PK Save %":     "gk_pksave_pct",
+        "Saves/90":      "gk_saves_p90",
+        "Win %":         "gk_win_pct",
     },
 }
+
+# Stats where a lower value is better — percentile is inverted (100 - rank)
+INVERTED_RADAR_STATS = {"gk_ga_p90"}
 
 
 def _pos_group(pos: str) -> str:
@@ -294,6 +296,10 @@ def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
     return model, feat_cols
 
 
+# Structural features: age/league/experience only — no performance stats
+STRUCTURAL_FEATURES = ["age", "age_sq", "age_factor", "league_tier", "seasons_count", "playing_time_min"]
+
+
 def train_value_model(df: pd.DataFrame):
     try:
         from xgboost import XGBRegressor
@@ -305,6 +311,8 @@ def train_value_model(df: pd.DataFrame):
         raise RuntimeError(f"Training data too small: {len(train_df)}")
 
     models = {}
+    structural_models = {}
+
     for pos, feat_list in POS_FEATURES.items():
         subset = train_df[train_df["pos_group"] == pos]
         feat_cols = [c for c in feat_list + ["age_factor", "league_tier"]
@@ -314,14 +322,20 @@ def train_value_model(df: pd.DataFrame):
         print(f"[Model {pos}] training on {len(subset)} players...")
         models[pos] = _train_one_model(subset, feat_cols)
 
-    return models
+        # Structural model (age/league only) for residual computation
+        struct_cols = [c for c in STRUCTURAL_FEATURES if c in subset.columns]
+        structural_models[pos] = _train_one_model(subset, struct_cols)
+
+    return models, structural_models
 
 
-def predict_values(df: pd.DataFrame, models: dict) -> pd.DataFrame:
+def predict_values(df: pd.DataFrame, models: dict,
+                   structural_models: dict = None) -> pd.DataFrame:
     df = df.copy()
     if "age" in df.columns:
         df["age_sq"] = pd.to_numeric(df["age"], errors="coerce").fillna(25) ** 2
     df["predicted_value_eur"] = np.nan
+    df["structural_value_eur"] = np.nan
 
     for pos, (model, feat_cols) in models.items():
         mask = df["pos_group"] == pos
@@ -331,10 +345,26 @@ def predict_values(df: pd.DataFrame, models: dict) -> pd.DataFrame:
         X = df.loc[mask, present].fillna(0)
         df.loc[mask, "predicted_value_eur"] = np.expm1(model.predict(X))
 
-    # Fallback: players whose position had no model → use median predicted
+        # Structural prediction (age/league baseline)
+        if structural_models and pos in structural_models:
+            sm, sc = structural_models[pos]
+            sc_present = [c for c in sc if c in df.columns]
+            Xs = df.loc[mask, sc_present].fillna(0)
+            df.loc[mask, "structural_value_eur"] = np.expm1(sm.predict(Xs))
+
+    # Fallback for unmatched positions
     fallback_mask = df["predicted_value_eur"].isna()
     if fallback_mask.any() and not df["predicted_value_eur"].dropna().empty:
         df.loc[fallback_mask, "predicted_value_eur"] = df["predicted_value_eur"].median()
+
+    # Performance premium: how much skill adds ABOVE age/league baseline
+    # Positive = player outperforms their age/league profile
+    sv = df["structural_value_eur"].replace(0, np.nan)
+    df["performance_premium"] = np.where(
+        sv.notna() & (sv > 0),
+        (df["predicted_value_eur"] - sv) / sv * 100,
+        np.nan,
+    )
 
     has_val = df["market_value_eur"] > 0
     df["undervalue_score"] = np.where(
@@ -411,9 +441,9 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     df = build_features(merged)
 
     print("[Model] Training position-specific XGBoost models...")
-    models = train_value_model(df)
+    models, structural_models = train_value_model(df)
 
-    result = predict_values(df, models)
+    result = predict_values(df, models, structural_models)
 
     # Save feature importances
     fi_records = []
@@ -428,10 +458,13 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
 
     save_cols = ["player", "team", "league", "pos", "age",
                  "market_value_eur", "predicted_value_eur", "undervalue_score",
+                 "structural_value_eur", "performance_premium",
                  "per_90_minutes_gls", "per_90_minutes_ast",
                  "xg_p90", "npxg_p90", "xa_p90",
                  "performance_tklw", "performance_int",
-                 "playing_time_min", "seasons_count", "latest_season"]
+                 "playing_time_min", "seasons_count", "latest_season",
+                 "gk_save_pct", "gk_ga_p90", "gk_cs_pct",
+                 "gk_pksave_pct", "gk_saves_p90", "gk_win_pct"]
     save_cols = [c for c in save_cols if c in result.columns]
 
     conn = sqlite3.connect(DB_PATH)
@@ -708,6 +741,21 @@ def get_all_teams() -> list[str]:
     return df["team"].tolist()
 
 
+def get_league_factors() -> pd.DataFrame:
+    """Return league scoring difficulty factors for goals/90 (one row per league)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql(
+            "SELECT league, league_mean, global_mean, factor FROM league_factors "
+            "WHERE stat = 'per_90_minutes_gls' ORDER BY factor DESC",
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame(columns=["league", "league_mean", "global_mean", "factor"])
+    conn.close()
+    return df
+
+
 def get_feature_importance(pos_group: str) -> pd.DataFrame:
     """Return feature importances for a position model, sorted descending."""
     conn = sqlite3.connect(DB_PATH)
@@ -741,6 +789,7 @@ def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
 
     # Pre-cast all possible stat columns
     all_cols = set(c for stats in POS_RADAR_STATS.values() for c in stats.values())
+    all_cols |= set(RADAR_STATS.values())
     for col in all_cols:
         if col in master.columns:
             master[col] = pd.to_numeric(master[col], errors="coerce").fillna(0)
@@ -760,7 +809,10 @@ def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
         rec = {"player": row["player"], "pos_group": pg}
         for label, col in radar.items():
             if col in peers.columns:
-                rec[label] = round(percentileofscore(peers[col].values, row[col], kind="rank"), 1)
+                pct = round(percentileofscore(peers[col].values, row[col], kind="rank"), 1)
+                if col in INVERTED_RADAR_STATS:
+                    pct = round(100.0 - pct, 1)
+                rec[label] = pct
             else:
                 rec[label] = 0.0
         records.append(rec)

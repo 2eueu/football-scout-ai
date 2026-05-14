@@ -16,7 +16,8 @@ def _bootstrap_db():
     DB = Path(__file__).parent.parent / "scout.db"
     DATA = Path(__file__).parent.parent / "data"
     # always_refresh: rebuilt locally before every push
-    always_refresh = {"players_master", "value_scouting", "player_roles", "market_values"}
+    always_refresh = {"players_master", "value_scouting", "player_roles",
+                      "market_values", "league_factors"}
     tables = {
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
@@ -25,6 +26,7 @@ def _bootstrap_db():
         "understat_xg":     DATA / "understat_xg.parquet",
         "player_roles":     DATA / "player_roles.parquet",
         "market_values":    DATA / "market_values.parquet",
+        "league_factors":   DATA / "league_factors.parquet",
     }
 
     if not DB.exists():
@@ -97,7 +99,7 @@ from models.form import get_form_trend, get_season_trend
 from models.value_scouting import (
     get_undervalued, get_similar_players,
     get_player_percentiles, get_player_role, RADAR_STATS, POS_RADAR_STATS,
-    get_team_fit_players, get_all_teams, get_feature_importance,
+    get_team_fit_players, get_all_teams, get_feature_importance, get_league_factors,
 )
 from models.report import generate_scout_pdf
 
@@ -223,6 +225,13 @@ with tab1:
                 "Assists/90": st.column_config.ProgressColumn("Assists/90", min_value=0, max_value=1.0, format="%.2f"),
                 "Form": st.column_config.TextColumn("Form", width="small"),
             },
+        )
+
+        st.download_button(
+            label="⬇ Download results as CSV",
+            data=display.to_csv(index=False).encode("utf-8"),
+            file_name="scout_results.csv",
+            mime="text/csv",
         )
 
         # ── Percentile radar comparison ──────────────────────
@@ -498,6 +507,31 @@ with tab2:
     st.markdown("### Undervalued Player Detection")
     st.caption("XGBoost model predicts performance-based fair value — players where predicted > actual market value are flagged as undervalued")
 
+    # ── League difficulty context ─────────────────────────────
+    with st.expander("League Scoring Difficulty", expanded=False):
+        try:
+            lf_df = get_league_factors()
+            if not lf_df.empty:
+                st.caption(
+                    "Goals/90 scoring rate per league vs Big 5 average — "
+                    "factor < 1 means this league scores more than average (stats slightly deflated in adj_* columns); "
+                    "factor > 1 means harder to score here (stats boosted)"
+                )
+                lf_display = lf_df.copy()
+                lf_display["League"] = lf_display["league"].str.replace(r"^.*?-", "", regex=True)
+                lf_display["Goals/90 (league avg)"] = lf_display["league_mean"].round(3)
+                lf_display["Goals/90 (global avg)"] = lf_display["global_mean"].round(3)
+                lf_display["Adj Factor"] = lf_display["factor"].round(3)
+                lf_display["Difficulty"] = lf_display["factor"].apply(
+                    lambda f: "Harder to score" if f > 1.03 else ("Easier to score" if f < 0.97 else "Average")
+                )
+                st.dataframe(
+                    lf_display[["League", "Goals/90 (league avg)", "Goals/90 (global avg)", "Adj Factor", "Difficulty"]],
+                    use_container_width=True, hide_index=True,
+                )
+        except Exception:
+            pass
+
     # ── Filters ──────────────────────────────────────────────
     f1, f2, f3, f4 = st.columns(4)
     with f1:
@@ -696,6 +730,8 @@ with tab2:
                             "performance_tklw": "Tackles Won", "performance_int": "Interceptions",
                             "performance_fld": "Fouls Drawn", "performance_fls": "Fouls Committed",
                             "performance_crdy": "Yellow Cards",
+                            "gk_save_pct": "Save %", "gk_ga_p90": "GA/90 (lower=better)",
+                            "gk_cs_pct": "Clean Sheet %", "gk_saves_p90": "Saves/90",
                         }
                         fi_df["label"] = fi_df["feature"].map(FEAT_LABELS).fillna(fi_df["feature"])
                         fi_df = fi_df.sort_values("importance", ascending=True)
