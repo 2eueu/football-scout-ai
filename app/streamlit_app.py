@@ -15,6 +15,8 @@ import pandas as pd
 def _bootstrap_db():
     DB = Path(__file__).parent.parent / "scout.db"
     DATA = Path(__file__).parent.parent / "data"
+    # always_refresh: rebuilt locally before every push
+    always_refresh = {"players_master", "value_scouting"}
     tables = {
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
@@ -33,13 +35,12 @@ def _bootstrap_db():
             pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
         conn.close()
     else:
-        # Migration: add any tables missing from an older scout.db
         conn = sqlite3.connect(DB)
         existing = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
         for table, path in tables.items():
-            if table not in existing and path.exists():
+            if (table not in existing or table in always_refresh) and path.exists():
                 pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
         conn.close()
 
