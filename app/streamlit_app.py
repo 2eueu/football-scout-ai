@@ -34,8 +34,11 @@ def _bootstrap_db():
 
 _bootstrap_db()
 
-if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
-    os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
+try:
+    if "GROQ_API_KEY" in st.secrets:
+        os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
+except Exception:
+    pass  # local: key comes from .env via python-dotenv in models/search.py
 
 from models.search import parse_query, search_players, get_player_detail
 from models.form import get_form_trend, get_season_trend
