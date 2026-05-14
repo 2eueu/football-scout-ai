@@ -103,7 +103,7 @@ See [`REPORT.md`](./REPORT.md) for full methodology.
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/your-username/football-scout-ai
+git clone https://github.com/2eueu/football-scout-ai
 cd football-scout-ai
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt

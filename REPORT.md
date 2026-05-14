@@ -217,4 +217,4 @@ Market value has non-linear relationships with age (the youth premium is convex)
 
 *Data: FBref (fbref.com) · Transfermarkt (transfermarkt.com)*
 *Period: 2022–23 to 2025–26*
-*Code: github.com/your-username/football-scout-ai*
+*Code: github.com/2eueu/football-scout-ai*
