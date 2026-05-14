@@ -16,13 +16,14 @@ def _bootstrap_db():
     DB = Path(__file__).parent.parent / "scout.db"
     DATA = Path(__file__).parent.parent / "data"
     # always_refresh: rebuilt locally before every push
-    always_refresh = {"players_master", "value_scouting"}
+    always_refresh = {"players_master", "value_scouting", "player_roles"}
     tables = {
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
         "statsbomb_events": DATA / "statsbomb_events.parquet",
         "players_raw":      DATA / "players_raw.parquet",
         "understat_xg":     DATA / "understat_xg.parquet",
+        "player_roles":     DATA / "player_roles.parquet",
     }
 
     if not DB.exists():
@@ -52,9 +53,51 @@ try:
 except Exception:
     pass  # local: key comes from .env via python-dotenv in models/search.py
 
+DB_PATH = Path(__file__).parent.parent / "scout.db"
+
+
+@st.cache_data(ttl=3600)
+def _form_badges() -> dict:
+    """25-26 vs 24-25 G+A/90 comparison → form badge per player."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql(
+            "SELECT player, season, per_90_minutes_g_a, playing_time_min "
+            "FROM players_raw WHERE season IN ('2425','2526') "
+            "AND CAST(playing_time_min AS REAL) >= 450",
+            conn,
+        )
+        conn.close()
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    df["g_a"] = pd.to_numeric(df["per_90_minutes_g_a"], errors="coerce").fillna(0)
+    pivot = df.pivot_table(index="player", columns="season", values="g_a", aggfunc="mean")
+    badges = {}
+    for player, row in pivot.iterrows():
+        v24 = row.get("2425")
+        v25 = row.get("2526")
+        if pd.isna(v24) or pd.isna(v25) or v24 == 0:
+            continue
+        chg = (v25 - v24) / v24
+        if chg >= 0.20:
+            badges[player] = "🔥 Hot"
+        elif chg >= 0.05:
+            badges[player] = "📈 Rising"
+        elif chg >= -0.10:
+            badges[player] = "→ Stable"
+        else:
+            badges[player] = "📉 Declining"
+    return badges
+
 from models.search import parse_query, search_players, get_player_detail
 from models.form import get_form_trend, get_season_trend
-from models.value_scouting import get_undervalued, get_similar_players
+from models.value_scouting import (
+    get_undervalued, get_similar_players,
+    get_player_percentiles, get_player_role, RADAR_STATS,
+)
+from models.report import generate_scout_pdf
 
 st.set_page_config(
     page_title="Football Scout AI",
@@ -131,7 +174,10 @@ with tab1:
 
         st.markdown(f"**{len(results)} players** found")
 
-        display = results.rename(columns={
+        badges = _form_badges()
+        display = results.copy()
+        display["Form"] = display["player"].map(badges).fillna("")
+        display = display.rename(columns={
             "player": "Player", "team": "Club", "pos": "Position",
             "age": "Age", "league": "League", "minutes": "Minutes",
             "goals_p90": "Goals/90", "assists_p90": "Assists/90",
@@ -143,37 +189,37 @@ with tab1:
             column_config={
                 "Goals/90": st.column_config.ProgressColumn("Goals/90", min_value=0, max_value=1.5, format="%.2f"),
                 "Assists/90": st.column_config.ProgressColumn("Assists/90", min_value=0, max_value=1.0, format="%.2f"),
+                "Form": st.column_config.TextColumn("Form", width="small"),
             },
         )
 
-        # ── Player comparison radar ──────────────────────────
+        # ── Percentile radar comparison ──────────────────────
         st.divider()
-        st.subheader("Player Comparison")
+        st.subheader("Percentile Profile Comparison")
+        st.caption("Percentile rank vs same position across Big 5 leagues")
         player_names = results["player"].tolist()
         default = player_names[:2] if len(player_names) >= 2 else player_names
         selected = st.multiselect("Select players to compare (max 3)", player_names, default=default, max_selections=3, key="compare_select")
 
         if len(selected) >= 2:
-            raw_cols = ["goals_p90", "assists_p90", "tackles_won", "interceptions", "minutes"]
-            labels   = ["Goals/90", "Assists/90", "Tackles", "Interceptions", "Minutes"]
-            colors   = ["#7EB8F7", "#F7C97E", "#7EF7A8"]
-            norm = results[["player"] + raw_cols].copy()
-            for col in raw_cols:
-                mx = norm[col].max()
-                norm[col] = norm[col] / mx if mx > 0 else 0
-
+            pct_df = get_player_percentiles(selected)
+            labels = list(RADAR_STATS.keys())
+            colors = ["#7EB8F7", "#F7C97E", "#7EF7A8"]
             fig = go.Figure()
             for i, player in enumerate(selected):
-                row = norm[norm["player"] == player]
-                if row.empty: continue
-                vals = row[raw_cols].iloc[0].tolist()
+                row = pct_df[pct_df["player"] == player]
+                if row.empty:
+                    continue
+                vals = [row.iloc[0].get(lbl, 50) for lbl in labels]
                 fig.add_trace(go.Scatterpolar(
                     r=vals + [vals[0]], theta=labels + [labels[0]],
                     fill="toself", name=player,
-                    line_color=colors[i], fillcolor=colors[i], opacity=0.3,
+                    line_color=colors[i % 3], fillcolor=colors[i % 3], opacity=0.25,
                 ))
             fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100],
+                                           tickvals=[25, 50, 75, 100],
+                                           ticktext=["25th", "50th", "75th", "100th"])),
                 showlegend=True, height=450,
                 paper_bgcolor="#0e1117", font_color="#ffffff",
                 margin=dict(t=30, b=30),
@@ -186,9 +232,8 @@ with tab1:
         detail_name = st.selectbox("Select player", player_names, key="detail_select")
         if detail_name:
             row = results[results["player"] == detail_name].iloc[0]
-            # Look up xG data for this player
             try:
-                _conn = sqlite3.connect(Path(__file__).parent.parent / "scout.db")
+                _conn = sqlite3.connect(DB_PATH)
                 _xg = pd.read_sql(
                     "SELECT xg_p90, npxg_p90, xa_p90 FROM players_master WHERE player = ? LIMIT 1",
                     _conn, params=[detail_name]
@@ -198,6 +243,10 @@ with tab1:
             except Exception:
                 _xg_row = None
 
+            role_info = get_player_role(detail_name)
+            role_label = role_info.get("role_label", "")
+
+            # Header: stat boxes + role badge
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             for col, (lbl, val) in zip(
                 [c1, c2, c3, c4, c5, c6],
@@ -212,11 +261,57 @@ with tab1:
                         unsafe_allow_html=True,
                     )
 
+            if role_label:
+                form_badge = _form_badges().get(detail_name, "")
+                badge_html = f'<span style="background:#2a2a1e;color:#F7C97E;padding:4px 12px;border-radius:20px;font-size:0.85rem;font-weight:600">{role_label}</span>'
+                if form_badge:
+                    badge_html += f' &nbsp;<span style="background:#1a2a1a;color:#7EF7A8;padding:4px 12px;border-radius:20px;font-size:0.85rem;font-weight:600">{form_badge}</span>'
+                st.markdown(badge_html, unsafe_allow_html=True)
+
+            st.write("")
             if _xg_row is not None and pd.notna(_xg_row.get("xg_p90", None)):
                 xg_c1, xg_c2, xg_c3 = st.columns(3)
                 xg_c1.metric("xG/90", f"{_xg_row['xg_p90']:.3f}")
                 xg_c2.metric("npxG/90", f"{_xg_row['npxg_p90']:.3f}")
                 xg_c3.metric("xA/90", f"{_xg_row['xa_p90']:.3f}")
+
+            # Percentile radar
+            pct_df = get_player_percentiles([detail_name])
+            if not pct_df.empty:
+                st.divider()
+                st.subheader("Percentile Profile (vs same position, Big 5)")
+                labels = list(RADAR_STATS.keys())
+                vals   = [pct_df.iloc[0].get(lbl, 50) for lbl in labels]
+                fig_pct = go.Figure()
+                fig_pct.add_trace(go.Scatterpolar(
+                    r=vals + [vals[0]], theta=labels + [labels[0]],
+                    fill="toself", name=detail_name,
+                    line_color="#7EB8F7", fillcolor="#7EB8F7", opacity=0.3,
+                ))
+                fig_pct.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100],
+                                               tickvals=[25, 50, 75, 100],
+                                               ticktext=["25th", "50th", "75th", "100th"])),
+                    showlegend=False, height=400,
+                    paper_bgcolor="#0e1117", font_color="#ffffff",
+                    margin=dict(t=30, b=30),
+                )
+                st.plotly_chart(fig_pct, use_container_width=True)
+
+            # PDF export
+            st.divider()
+            if st.button("Download Scout Report (PDF)", key="pdf_btn"):
+                try:
+                    pdf_bytes = generate_scout_pdf(detail_name)
+                    st.download_button(
+                        label="Save PDF",
+                        data=pdf_bytes,
+                        file_name=f"{detail_name.replace(' ', '_')}_scout_report.pdf",
+                        mime="application/pdf",
+                        key="pdf_dl",
+                    )
+                except Exception as e:
+                    st.error(f"PDF generation failed: {e}")
 
             detail = get_player_detail(detail_name)
             sb = detail.get("statsbomb")
@@ -369,7 +464,6 @@ with tab2:
             st.subheader("Actual vs Predicted Market Value")
             st.caption("Above the line = undervalued (predicted > actual) | Below = overvalued")
 
-            DB_PATH = Path(__file__).parent.parent / "scout.db"
             conn = sqlite3.connect(DB_PATH)
             scatter_df = pd.read_sql(
                 """SELECT player, team, league, pos, age,
@@ -460,10 +554,14 @@ with tab2:
                 m1.metric("Club", row["team"])
                 m2.metric("Position", row["pos"])
                 m3.metric("Age", str(row["age"]))
-                m4.metric("Market value", f"€{actual:.1f}M")
-                m5.metric("Model estimate", f"€{predict:.1f}M", delta=f"{score:+.1f}%")
+                m4.metric("Market value", f"EUR{actual:.1f}M")
+                m5.metric("Model estimate", f"EUR{predict:.1f}M", delta=f"{score:+.1f}%")
 
-                st.markdown(f'<span class="{tag}">{label}</span>', unsafe_allow_html=True)
+                val_role = get_player_role(selected_val).get("role_label", "")
+                badge_row = f'<span class="{tag}">{label}</span>'
+                if val_role:
+                    badge_row += f' &nbsp;<span style="background:#2a2a1e;color:#F7C97E;padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:600">{val_role}</span>'
+                st.markdown(badge_row, unsafe_allow_html=True)
 
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(

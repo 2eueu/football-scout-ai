@@ -10,3 +10,5 @@ python-dotenv
 requests
 beautifulsoup4
 lxml
+fpdf2
+scipy

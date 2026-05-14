@@ -129,6 +129,29 @@ BASE_FEATURES = [
     "xg_p90", "npxg_p90", "xa_p90",
 ]
 
+POS_FEATURES = {
+    "FW": BASE_FEATURES,
+    "MF": BASE_FEATURES,
+    "DF": [
+        "age", "seasons_count", "playing_time_min", "playing_time_90s",
+        "performance_tklw", "performance_int", "performance_fld", "performance_fls",
+        "performance_crdy", "per_90_minutes_g_a",
+        "standard_sh_90", "xg_p90", "xa_p90",
+    ],
+    "GK": ["age", "seasons_count", "playing_time_min"],
+}
+
+RADAR_STATS = {
+    "Goals/90":      "per_90_minutes_gls",
+    "xG/90":         "xg_p90",
+    "Assists/90":    "per_90_minutes_ast",
+    "xA/90":         "xa_p90",
+    "Shots/90":      "standard_sh_90",
+    "G+A/90":        "per_90_minutes_g_a",
+    "Tackles":       "performance_tklw",
+    "Interceptions": "performance_int",
+}
+
 
 def _pos_group(pos: str) -> str:
     if not isinstance(pos, str):
@@ -166,25 +189,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── 모델 학습 & 예측 ──────────────────────────────────────────
+# ── 모델 학습 & 예측 (position-specific) ─────────────────────
 
-def train_value_model(df: pd.DataFrame):
-    try:
-        from xgboost import XGBRegressor
-        from sklearn.model_selection import cross_val_score
-    except ImportError:
-        raise ImportError("pip install xgboost scikit-learn")
+def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
+    from xgboost import XGBRegressor
+    from sklearn.model_selection import cross_val_score
 
-    train_df = df[df["market_value_eur"] > 0].copy()
-    if len(train_df) < 50:
-        raise RuntimeError(f"학습 데이터 부족: {len(train_df)}명")
-
+    train_df = train_df.copy()
     train_df["log_value"] = np.log1p(train_df["market_value_eur"])
-
-    feat_cols = [c for c in BASE_FEATURES + ["age_factor", "league_tier"]
-                 if c in train_df.columns]
-    pos_dummies = pd.get_dummies(train_df["pos_group"], prefix="pos")
-    X = pd.concat([train_df[feat_cols], pos_dummies], axis=1).fillna(0)
+    X = train_df[feat_cols].fillna(0)
     y = train_df["log_value"]
 
     model = XGBRegressor(
@@ -193,23 +206,52 @@ def train_value_model(df: pd.DataFrame):
     )
     model.fit(X, y)
 
-    cv = cross_val_score(model, X, y, cv=5, scoring="neg_root_mean_squared_error")
-    print(f"[모델] 5-fold CV RMSE (log): {-cv.mean():.4f} ± {cv.std():.4f}")
+    if len(train_df) >= 10:
+        cv = cross_val_score(model, X, y, cv=min(5, len(train_df)//5),
+                             scoring="neg_root_mean_squared_error")
+        print(f"  CV RMSE: {-cv.mean():.4f} ± {cv.std():.4f}  (n={len(train_df)})")
 
-    return model, X.columns.tolist(), pos_dummies.columns.tolist()
+    return model, feat_cols
 
 
-def predict_values(df: pd.DataFrame, model, feature_cols, pos_cols) -> pd.DataFrame:
-    pos_dummies = pd.get_dummies(df["pos_group"], prefix="pos")
-    for col in pos_cols:
-        if col not in pos_dummies.columns:
-            pos_dummies[col] = 0
+def train_value_model(df: pd.DataFrame):
+    try:
+        from xgboost import XGBRegressor
+    except ImportError:
+        raise ImportError("pip install xgboost scikit-learn")
 
-    base_feats = [c for c in feature_cols if not c.startswith("pos_")]
-    X_all = pd.concat([df[base_feats].fillna(0), pos_dummies[pos_cols]], axis=1)
+    train_df = df[df["market_value_eur"] > 0].copy()
+    if len(train_df) < 30:
+        raise RuntimeError(f"Training data too small: {len(train_df)}")
 
+    models = {}
+    for pos, feat_list in POS_FEATURES.items():
+        subset = train_df[train_df["pos_group"] == pos]
+        feat_cols = [c for c in feat_list + ["age_factor", "league_tier"]
+                     if c in subset.columns]
+        if len(subset) < 10:
+            continue
+        print(f"[Model {pos}] training on {len(subset)} players...")
+        models[pos] = _train_one_model(subset, feat_cols)
+
+    return models
+
+
+def predict_values(df: pd.DataFrame, models: dict) -> pd.DataFrame:
     df = df.copy()
-    df["predicted_value_eur"] = np.expm1(model.predict(X_all))
+    df["predicted_value_eur"] = np.nan
+
+    for pos, (model, feat_cols) in models.items():
+        mask = df["pos_group"] == pos
+        if not mask.any():
+            continue
+        X = df.loc[mask, feat_cols].fillna(0)
+        df.loc[mask, "predicted_value_eur"] = np.expm1(model.predict(X))
+
+    # Fallback: players whose position had no model → use median predicted
+    fallback_mask = df["predicted_value_eur"].isna()
+    if fallback_mask.any() and not df["predicted_value_eur"].dropna().empty:
+        df.loc[fallback_mask, "predicted_value_eur"] = df["predicted_value_eur"].median()
 
     has_val = df["market_value_eur"] > 0
     df["undervalue_score"] = np.where(
@@ -258,14 +300,15 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
 
     df = build_features(merged)
 
-    print("[모델] XGBoost 학습 중...")
-    model, feat_cols, pos_cols = train_value_model(df)
+    print("[Model] Training position-specific XGBoost models...")
+    models = train_value_model(df)
 
-    result = predict_values(df, model, feat_cols, pos_cols)
+    result = predict_values(df, models)
 
     save_cols = ["player", "team", "league", "pos", "age",
                  "market_value_eur", "predicted_value_eur", "undervalue_score",
                  "per_90_minutes_gls", "per_90_minutes_ast",
+                 "xg_p90", "npxg_p90", "xa_p90",
                  "performance_tklw", "performance_int",
                  "playing_time_min", "seasons_count", "latest_season"]
     save_cols = [c for c in save_cols if c in result.columns]
@@ -273,7 +316,7 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     conn = sqlite3.connect(DB_PATH)
     result[save_cols].to_sql("value_scouting", conn, if_exists="replace", index=False)
     conn.close()
-    print(f"[DB] value_scouting 저장: {len(result)}명")
+    print(f"[DB] value_scouting saved: {len(result)} players")
 
     return result[save_cols]
 
@@ -415,6 +458,135 @@ def get_similar_players(
         "npxg_p90":           "npxG/90",
         "xa_p90":             "xA/90",
     })
+
+
+# ── 퍼센타일 레이더 ────────────────────────────────────────────
+
+def get_player_percentiles(player_names: list[str]) -> pd.DataFrame:
+    """
+    Returns 0-100 percentile ranks for each player within their position group.
+    Columns: player + one column per RADAR_STATS key.
+    """
+    from scipy.stats import percentileofscore
+
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    conn.close()
+
+    master = master.drop_duplicates("player")
+    master["pos_group"] = master["pos"].apply(_pos_group)
+
+    for col in RADAR_STATS.values():
+        master[col] = pd.to_numeric(master.get(col, 0), errors="coerce").fillna(0)
+
+    records = []
+    for name in player_names:
+        row = master[master["player"].str.lower() == name.lower()]
+        if row.empty:
+            row = master[master["player"].str.contains(name, case=False, na=False)]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+        pg = row["pos_group"]
+        peers = master[master["pos_group"] == pg]
+
+        rec = {"player": row["player"], "pos_group": pg}
+        for label, col in RADAR_STATS.items():
+            rec[label] = round(percentileofscore(peers[col].values, row[col], kind="rank"), 1)
+        records.append(rec)
+
+    return pd.DataFrame(records)
+
+
+# ── 역할 클러스터링 ────────────────────────────────────────────
+
+CLUSTER_FEATURES = [
+    "per_90_minutes_gls", "per_90_minutes_ast", "per_90_minutes_g_a",
+    "xg_p90", "xa_p90", "standard_sh_90",
+    "performance_tklw", "performance_int", "performance_fld",
+    "playing_time_min",
+]
+
+ROLE_LABELS = {
+    "FW": {
+        0: "Target Forward",   1: "False 9 / Link-Up",   2: "Clinical Striker",
+        3: "Wide Forward",     4: "Pressing Forward",    5: "Withdrawn Striker",
+    },
+    "MF": {
+        0: "Deep-Lying Playmaker", 1: "Box-to-Box",       2: "Attacking Midfielder",
+        3: "Defensive Midfielder", 4: "Wide Midfielder",  5: "Pressing Midfielder",
+    },
+    "DF": {
+        0: "Ball-Playing CB",  1: "Defensive CB",         2: "Fullback (Attacking)",
+        3: "Fullback (Defensive)", 4: "Sweeper",          5: "Wing-Back",
+    },
+    "GK": {0: "Goalkeeper"},
+}
+
+
+def compute_role_clusters(n_clusters: int = 6, min_minutes: int = 500) -> pd.DataFrame:
+    """
+    K-means cluster players within each position group.
+    Returns DataFrame with player + role_cluster + role_label columns.
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    conn.close()
+
+    master = master.drop_duplicates("player")
+    master["pos_group"] = master["pos"].apply(_pos_group)
+    master["playing_time_min"] = pd.to_numeric(master["playing_time_min"], errors="coerce").fillna(0)
+    master = master[master["playing_time_min"] >= min_minutes].copy()
+
+    for col in CLUSTER_FEATURES:
+        master[col] = pd.to_numeric(master.get(col, 0), errors="coerce").fillna(0)
+
+    records = []
+    for pg in ["FW", "MF", "DF", "GK"]:
+        subset = master[master["pos_group"] == pg].copy()
+        if len(subset) < n_clusters:
+            subset["role_cluster"] = 0
+            subset["role_label"] = ROLE_LABELS.get(pg, {}).get(0, pg)
+            records.append(subset[["player", "role_cluster", "role_label"]])
+            continue
+
+        feat_cols = [c for c in CLUSTER_FEATURES if c in subset.columns]
+        X = subset[feat_cols].fillna(0).values
+        X_scaled = StandardScaler().fit_transform(X)
+
+        k = min(n_clusters, len(subset) // 10)
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        subset["role_cluster"] = km.fit_predict(X_scaled)
+
+        # Sort clusters by goal contribution to assign consistent labels
+        cluster_means = subset.groupby("role_cluster")["per_90_minutes_gls"].mean().sort_values(ascending=False)
+        cluster_rank = {old: new for new, old in enumerate(cluster_means.index)}
+        subset["role_cluster"] = subset["role_cluster"].map(cluster_rank)
+        labels = ROLE_LABELS.get(pg, {})
+        subset["role_label"] = subset["role_cluster"].map(labels).fillna(pg)
+        records.append(subset[["player", "role_cluster", "role_label"]])
+        print(f"  [{pg}] {len(subset)} players → {k} clusters")
+
+    return pd.concat(records, ignore_index=True)
+
+
+def get_player_role(player_name: str) -> dict:
+    """Return role_cluster and role_label for a single player."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql(
+            "SELECT player, role_cluster, role_label FROM player_roles WHERE player = ? LIMIT 1",
+            conn, params=[player_name]
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    if df.empty:
+        return {}
+    return df.iloc[0].to_dict()
 
 
 if __name__ == "__main__":
