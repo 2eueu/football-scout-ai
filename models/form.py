@@ -208,16 +208,28 @@ def get_season_trend(player_name: str) -> dict:
       minutes      — 시즌별 출전 분
       trend        — "상승 ↑" | "하락 ↓" | "안정 →"
     """
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql(
-        """SELECT season, playing_time_min, per_90_minutes_gls, per_90_minutes_ast,
-                  per_90_minutes_g_a, standard_sh_90
-           FROM players_raw
-           WHERE player = ?
-           ORDER BY season ASC""",
-        conn, params=[player_name]
-    )
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql(
+            """SELECT season, playing_time_min, per_90_minutes_gls, per_90_minutes_ast,
+                      per_90_minutes_g_a, standard_sh_90
+               FROM players_raw
+               WHERE player = ?
+               ORDER BY season ASC""",
+            conn, params=[player_name]
+        )
+        conn.close()
+    except Exception:
+        # players_raw table missing — fall back to parquet
+        try:
+            raw_path = DB_PATH.parent / "data" / "players_raw.parquet"
+            all_raw = pd.read_parquet(raw_path)
+            df = all_raw[all_raw["player"] == player_name].sort_values("season")
+            cols = ["season", "playing_time_min", "per_90_minutes_gls",
+                    "per_90_minutes_ast", "per_90_minutes_g_a", "standard_sh_90"]
+            df = df[[c for c in cols if c in df.columns]]
+        except Exception:
+            return {"has_data": False, "player": player_name}
 
     if df.empty:
         return {"has_data": False, "player": player_name}

@@ -155,7 +155,12 @@ def search_players(filters: dict) -> pd.DataFrame:
     if sort_by == "form":
         sql = f"""
             SELECT
-                m.player, m.team, m.pos, m.age, m.league,
+                m.player, m.team, m.pos,
+                CAST(SUBSTR(CAST(m.age AS TEXT), 1,
+                     CASE WHEN INSTR(CAST(m.age AS TEXT), '-') > 0
+                          THEN INSTR(CAST(m.age AS TEXT), '-') - 1
+                          ELSE LENGTH(CAST(m.age AS TEXT)) END) AS INTEGER) AS age,
+                m.league,
                 CAST(m.playing_time_min AS INTEGER) AS minutes,
                 ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
                 ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,
@@ -180,7 +185,12 @@ def search_players(filters: dict) -> pd.DataFrame:
     elif sort_by == "undervalue":
         sql = f"""
             SELECT
-                m.player, m.team, m.pos, m.age, m.league,
+                m.player, m.team, m.pos,
+                CAST(SUBSTR(CAST(m.age AS TEXT), 1,
+                     CASE WHEN INSTR(CAST(m.age AS TEXT), '-') > 0
+                          THEN INSTR(CAST(m.age AS TEXT), '-') - 1
+                          ELSE LENGTH(CAST(m.age AS TEXT)) END) AS INTEGER) AS age,
+                m.league,
                 CAST(m.playing_time_min AS INTEGER) AS minutes,
                 ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
                 ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,
@@ -204,7 +214,12 @@ def search_players(filters: dict) -> pd.DataFrame:
         sort_col = SORT_COLUMN_MAP.get(sort_by, "CAST(m.per_90_minutes_gls AS REAL)")
         sql = f"""
             SELECT
-                m.player, m.team, m.pos, m.age, m.league,
+                m.player, m.team, m.pos,
+                CAST(SUBSTR(CAST(m.age AS TEXT), 1,
+                     CASE WHEN INSTR(CAST(m.age AS TEXT), '-') > 0
+                          THEN INSTR(CAST(m.age AS TEXT), '-') - 1
+                          ELSE LENGTH(CAST(m.age AS TEXT)) END) AS INTEGER) AS age,
+                m.league,
                 CAST(m.playing_time_min AS INTEGER) AS minutes,
                 ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
                 ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,

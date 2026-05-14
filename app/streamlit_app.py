@@ -14,8 +14,6 @@ import pandas as pd
 # ── bootstrap: parquet → scout.db (Streamlit Cloud / fresh clone) ──────────
 def _bootstrap_db():
     DB = Path(__file__).parent.parent / "scout.db"
-    if DB.exists():
-        return
     DATA = Path(__file__).parent.parent / "data"
     tables = {
         "players_master":   DATA / "players_master.parquet",
@@ -23,14 +21,26 @@ def _bootstrap_db():
         "statsbomb_events": DATA / "statsbomb_events.parquet",
         "players_raw":      DATA / "players_raw.parquet",
     }
-    missing = [name for name, path in tables.items() if not path.exists()]
-    if missing:
-        st.error(f"Missing data files: {missing}")
-        st.stop()
-    conn = sqlite3.connect(DB)
-    for table, path in tables.items():
-        pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
-    conn.close()
+
+    if not DB.exists():
+        missing = [n for n, p in tables.items() if not p.exists()]
+        if missing:
+            st.error(f"Missing data files: {missing}")
+            st.stop()
+        conn = sqlite3.connect(DB)
+        for table, path in tables.items():
+            pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
+        conn.close()
+    else:
+        # Migration: add any tables missing from an older scout.db
+        conn = sqlite3.connect(DB)
+        existing = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        for table, path in tables.items():
+            if table not in existing and path.exists():
+                pd.read_parquet(path).to_sql(table, conn, if_exists="replace", index=False)
+        conn.close()
 
 _bootstrap_db()
 
