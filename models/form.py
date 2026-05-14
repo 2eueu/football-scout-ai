@@ -197,37 +197,39 @@ SEASON_LABELS = {"2223": "22-23", "2324": "23-24", "2425": "24-25", "2526": "25-
 
 def get_season_trend(player_name: str) -> dict:
     """
-    players_raw 시즌별 스탯으로 퍼포먼스 추세 반환 (전체 선수 커버).
+    players_raw + understat_xg 시즌별 스탯 → 성장 곡선 + 방향성 지표.
     반환:
-      has_data     — 시즌 데이터 존재 여부
-      seasons      — ["22-23", "23-24", ...]
-      gls_p90      — 시즌별 골/90
-      ast_p90      — 시즌별 어시스트/90
-      g_a_p90      — 시즌별 공격포인트/90
-      sh_90        — 시즌별 슈팅/90
-      minutes      — 시즌별 출전 분
-      trend        — "상승 ↑" | "하락 ↓" | "안정 →"
+      has_data / seasons / gls_p90 / ast_p90 / g_a_p90 / sh_90 / xg_p90 / xa_p90 /
+      minutes / trend / trajectory_score / peak_season / momentum
     """
     try:
         conn = sqlite3.connect(DB_PATH)
         df = pd.read_sql(
             """SELECT season, playing_time_min, per_90_minutes_gls, per_90_minutes_ast,
                       per_90_minutes_g_a, standard_sh_90
-               FROM players_raw
-               WHERE player = ?
-               ORDER BY season ASC""",
-            conn, params=[player_name]
+               FROM players_raw WHERE player = ? ORDER BY season ASC""",
+            conn, params=[player_name],
         )
+        try:
+            xg_df = pd.read_sql(
+                """SELECT season,
+                          SUM(CAST(xg AS REAL)) / NULLIF(SUM(CAST(minutes AS REAL)), 0) * 90 AS xg_p90,
+                          SUM(CAST(xa AS REAL)) / NULLIF(SUM(CAST(minutes AS REAL)), 0) * 90 AS xa_p90
+                   FROM understat_xg WHERE player = ? GROUP BY season""",
+                conn, params=[player_name],
+            )
+        except Exception:
+            xg_df = pd.DataFrame()
         conn.close()
     except Exception:
-        # players_raw table missing — fall back to parquet
         try:
             raw_path = DB_PATH.parent / "data" / "players_raw.parquet"
             all_raw = pd.read_parquet(raw_path)
             df = all_raw[all_raw["player"] == player_name].sort_values("season")
-            cols = ["season", "playing_time_min", "per_90_minutes_gls",
-                    "per_90_minutes_ast", "per_90_minutes_g_a", "standard_sh_90"]
-            df = df[[c for c in cols if c in df.columns]]
+            df = df[[c for c in ["season", "playing_time_min", "per_90_minutes_gls",
+                                  "per_90_minutes_ast", "per_90_minutes_g_a", "standard_sh_90"]
+                     if c in df.columns]]
+            xg_df = pd.DataFrame()
         except Exception:
             return {"has_data": False, "player": player_name}
 
@@ -238,34 +240,50 @@ def get_season_trend(player_name: str) -> dict:
                 "per_90_minutes_g_a", "standard_sh_90"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    df = df[df["playing_time_min"] >= 90].copy()
+    df = df[df["playing_time_min"] >= 200].copy()
     if df.empty:
         return {"has_data": False, "player": player_name}
 
+    if not xg_df.empty:
+        xg_df["season"] = xg_df["season"].astype(str)
+        df = df.merge(xg_df, on="season", how="left")
+    else:
+        df["xg_p90"] = np.nan
+        df["xa_p90"] = np.nan
+
     df["season_label"] = df["season"].map(SEASON_LABELS).fillna(df["season"])
 
-    gls = df["per_90_minutes_gls"].tolist()
-    if len(gls) >= 2:
-        slope = float(np.polyfit(range(len(gls)), gls, 1)[0])
-        if slope > 0.05:
-            trend = "Rising ↑"
-        elif slope < -0.05:
-            trend = "Falling ↓"
-        else:
-            trend = "Stable →"
+    ga = df["per_90_minutes_g_a"].tolist()
+    n = len(ga)
+
+    if n >= 2:
+        slope = float(np.polyfit(np.arange(n), ga, 1)[0])
+        trajectory_score = round(float(np.clip(slope / 0.002, -100, 100)), 1)
+        trend = "↑ Rising" if slope > 0.03 else ("↓ Declining" if slope < -0.03 else "→ Stable")
     else:
-        trend = "Stable →"
+        slope = 0.0
+        trajectory_score = 0.0
+        trend = "→ Stable"
+
+    peak_idx = int(np.argmax(ga)) if ga else 0
+    peak_season = df["season_label"].iloc[peak_idx] if not df.empty else "—"
+    momentum = round(ga[-1] - ga[-2], 3) if n >= 2 else 0.0
 
     return {
-        "has_data": True,
-        "player": player_name,
-        "seasons": df["season_label"].tolist(),
-        "gls_p90": df["per_90_minutes_gls"].round(2).tolist(),
-        "ast_p90": df["per_90_minutes_ast"].round(2).tolist(),
-        "g_a_p90": df["per_90_minutes_g_a"].round(2).tolist(),
-        "sh_90":   df["standard_sh_90"].round(2).tolist(),
-        "minutes": df["playing_time_min"].astype(int).tolist(),
-        "trend": trend,
+        "has_data":          True,
+        "player":            player_name,
+        "seasons":           df["season_label"].tolist(),
+        "gls_p90":           df["per_90_minutes_gls"].round(3).tolist(),
+        "ast_p90":           df["per_90_minutes_ast"].round(3).tolist(),
+        "g_a_p90":           df["per_90_minutes_g_a"].round(3).tolist(),
+        "sh_90":             df["standard_sh_90"].round(3).tolist(),
+        "xg_p90":            df["xg_p90"].round(3).tolist() if "xg_p90" in df else [],
+        "xa_p90":            df["xa_p90"].round(3).tolist() if "xa_p90" in df else [],
+        "minutes":           df["playing_time_min"].astype(int).tolist(),
+        "trend":             trend,
+        "trajectory_score":  trajectory_score,
+        "peak_season":       peak_season,
+        "momentum":          momentum,
     }
 
 

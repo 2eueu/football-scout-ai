@@ -13,8 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
 
 DB_PATH = Path(__file__).parent.parent / "scout.db"
 
@@ -38,6 +36,8 @@ TM_LEAGUES = {
 
 def _get_league_teams(league_id: str, league_slug: str) -> dict:
     """Return {team_id: team_slug} for all teams in the league."""
+    import requests
+    from bs4 import BeautifulSoup
     url = f"https://www.transfermarkt.com/{league_slug}/startseite/wettbewerb/{league_id}/saison_id/2025"
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -58,6 +58,8 @@ def _get_league_teams(league_id: str, league_slug: str) -> dict:
 
 def _scrape_team_squad(team_id: str, team_slug: str, league_name: str) -> list[dict]:
     """Scrape market values for all players in a team squad."""
+    import requests
+    from bs4 import BeautifulSoup
     url = f"https://www.transfermarkt.com/{team_slug}/kader/verein/{team_id}/saison_id/2025"
     records = []
     try:
