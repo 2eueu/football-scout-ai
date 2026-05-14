@@ -808,8 +808,8 @@ with tab2:
                     marker_color="#7EF7A8",
                     width=0.3,
                     error_y=dict(
-                        type="data", array=[_ci_m], arrayminus=[min(_ci_m, predict * 0.9)],
-                        visible=_ci_m > 0, color="#aaa", thickness=2, width=6,
+                        type="data", array=[float(_ci_m)], arrayminus=[float(min(_ci_m, predict * 0.9))],
+                        visible=bool(_ci_m > 0), color="#aaa", thickness=2, width=6,
                     ),
                 ))
                 fig_bar.update_layout(
