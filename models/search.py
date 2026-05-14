@@ -134,18 +134,25 @@ SORT_COLUMN_MAP = {
 }
 
 
+def _prefix_where(where_clause: str) -> str:
+    """Prefix players_master columns with 'm.' alias for JOIN queries."""
+    w = where_clause
+    w = w.replace("pos LIKE", "m.pos LIKE")
+    w = w.replace("CAST(age", "CAST(m.age")
+    w = w.replace("league IN", "m.league IN")
+    w = w.replace("CAST(per_90", "CAST(m.per_90")
+    w = w.replace("CAST(playing_time", "CAST(m.playing_time")
+    return w
+
+
 def search_players(filters: dict) -> pd.DataFrame:
     """필터 dict → 선수 검색 결과 DataFrame"""
     where_clause, params = build_query(filters)
     sort_by = filters.get("sort_by") or ""
     limit = int(filters.get("limit") or 10)
+    where_master = _prefix_where(where_clause)
 
     if sort_by == "form":
-        # 25-26 최신 시즌 퍼포먼스로 정렬
-        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
-            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
-            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
-        )
         sql = f"""
             SELECT
                 m.player, m.team, m.pos, m.age, m.league,
@@ -171,10 +178,6 @@ def search_players(filters: dict) -> pd.DataFrame:
             LIMIT ?
         """
     elif sort_by == "undervalue":
-        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
-            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
-            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
-        )
         sql = f"""
             SELECT
                 m.player, m.team, m.pos, m.age, m.league,
@@ -199,10 +202,6 @@ def search_players(filters: dict) -> pd.DataFrame:
         """
     else:
         sort_col = SORT_COLUMN_MAP.get(sort_by, "CAST(m.per_90_minutes_gls AS REAL)")
-        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
-            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
-            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
-        )
         sql = f"""
             SELECT
                 m.player, m.team, m.pos, m.age, m.league,

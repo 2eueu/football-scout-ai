@@ -98,7 +98,7 @@ def build_windows(players: list[str]) -> tuple[np.ndarray, np.ndarray, float]:
 
 # ── 학습 ─────────────────────────────────────────────────────
 
-def train(epochs: int = 80, lr: float = 1e-3) -> FormLSTM:
+def train(epochs: int = 80, lr: float = 1e-3):
     print("[Form LSTM] 학습 데이터 준비 중...")
     players = get_all_players_with_data()
     X, y, y_max = build_windows(players)
