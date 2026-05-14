@@ -338,12 +338,19 @@ def get_similar_players(
     master = pd.read_sql("SELECT * FROM players_master", conn)
     try:
         vs = pd.read_sql(
-            "SELECT player, market_value_eur, predicted_value_eur, undervalue_score FROM value_scouting",
+            """SELECT player, market_value_eur, predicted_value_eur, undervalue_score
+               FROM value_scouting
+               WHERE market_value_eur > 0""",
             conn,
         )
     except Exception:
         vs = pd.DataFrame()
     conn.close()
+
+    # deduplicate before any merge — value_scouting can have multiple rows per player
+    master = master.drop_duplicates(subset=["player"])
+    if not vs.empty:
+        vs = vs.drop_duplicates(subset=["player"])
 
     df = build_features(master)
     if not vs.empty:
@@ -377,6 +384,7 @@ def get_similar_players(
         result = result[result["market_value_eur"] <= target_val * 0.85]
 
     result = result[result["market_value_eur"] > 0]
+    result = result.drop_duplicates(subset=["player"])
     result = result.sort_values("similarity", ascending=False).head(top_n)
 
     result["similarity_pct"] = (result["similarity"] * 100).round(1)
