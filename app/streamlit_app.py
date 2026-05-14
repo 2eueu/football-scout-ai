@@ -94,14 +94,20 @@ def _form_badges() -> dict:
             badges[player] = "📉 Declining"
     return badges
 
-from models.search import parse_query, search_players, get_player_detail
-from models.form import get_form_trend, get_season_trend
-from models.value_scouting import (
-    get_undervalued, get_similar_players,
-    get_player_percentiles, get_player_role, RADAR_STATS, POS_RADAR_STATS,
-    get_team_fit_players, get_all_teams, get_feature_importance, get_league_factors,
-)
-from models.report import generate_scout_pdf
+import traceback as _tb
+try:
+    from models.search import parse_query, search_players, get_player_detail
+    from models.form import get_form_trend, get_season_trend
+    from models.value_scouting import (
+        get_undervalued, get_similar_players,
+        get_player_percentiles, get_player_role, RADAR_STATS, POS_RADAR_STATS,
+        get_team_fit_players, get_all_teams, get_feature_importance, get_league_factors,
+    )
+    from models.report import generate_scout_pdf
+except Exception as _e:
+    st.error("**Import error — see details below**")
+    st.code(_tb.format_exc())
+    st.stop()
 
 
 def _build_radar(pct_df: pd.DataFrame, height: int = 380) -> go.Figure:
