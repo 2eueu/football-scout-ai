@@ -291,12 +291,14 @@ def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
     )
     model.fit(X, y)
 
+    rmse = float("nan")
     if len(train_df) >= 10:
         cv = cross_val_score(model, X, y, cv=min(5, len(train_df) // 5),
                              scoring="neg_root_mean_squared_error")
-        print(f"  CV RMSE: {-cv.mean():.4f} ± {cv.std():.4f}  (n={len(train_df)})")
+        rmse = float(-cv.mean())
+        print(f"  CV RMSE: {rmse:.4f} ± {cv.std():.4f}  (n={len(train_df)})")
 
-    return model, feat_cols
+    return model, feat_cols, rmse
 
 
 # Structural features: age/league/experience only — no performance stats
@@ -315,6 +317,7 @@ def train_value_model(df: pd.DataFrame):
 
     models = {}
     structural_models = {}
+    model_rmse = {}
 
     for pos, feat_list in POS_FEATURES.items():
         subset = train_df[train_df["pos_group"] == pos]
@@ -323,13 +326,15 @@ def train_value_model(df: pd.DataFrame):
         if len(subset) < 10:
             continue
         print(f"[Model {pos}] training on {len(subset)} players...")
-        models[pos] = _train_one_model(subset, feat_cols)
+        m, fc, rmse = _train_one_model(subset, feat_cols)
+        models[pos] = (m, fc)
+        model_rmse[pos] = {"rmse": round(rmse, 4), "n_train": len(subset)}
 
-        # Structural model (age/league only) for residual computation
         struct_cols = [c for c in STRUCTURAL_FEATURES if c in subset.columns]
-        structural_models[pos] = _train_one_model(subset, struct_cols)
+        sm, sfc, _ = _train_one_model(subset, struct_cols)
+        structural_models[pos] = (sm, sfc)
 
-    return models, structural_models
+    return models, structural_models, model_rmse
 
 
 def predict_values(df: pd.DataFrame, models: dict,
@@ -444,9 +449,16 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     df = build_features(merged)
 
     print("[Model] Training position-specific XGBoost models...")
-    models, structural_models = train_value_model(df)
+    models, structural_models, model_rmse = train_value_model(df)
 
     result = predict_values(df, models, structural_models)
+
+    # Save model metrics (CV RMSE per position)
+    if model_rmse:
+        metrics_rows = [{"pos_group": pos, **v} for pos, v in model_rmse.items()]
+        conn = sqlite3.connect(DB_PATH)
+        pd.DataFrame(metrics_rows).to_sql("model_metrics", conn, if_exists="replace", index=False)
+        conn.close()
 
     # Save feature importances
     fi_records = []
@@ -757,6 +769,182 @@ def get_league_factors() -> pd.DataFrame:
         df = pd.DataFrame(columns=["league", "league_mean", "global_mean", "factor"])
     conn.close()
     return df
+
+
+def get_model_metrics() -> pd.DataFrame:
+    """Return CV RMSE per position for the current full model."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM model_metrics ORDER BY pos_group", conn)
+    except Exception:
+        df = pd.DataFrame(columns=["pos_group", "rmse", "n_train"])
+    conn.close()
+    return df
+
+
+def get_age_curve_data(pos_group: str = "FW") -> dict:
+    """
+    Polynomial age-value curve for a position group.
+    Returns scatter points, fitted curve, and peak age.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql(
+        "SELECT player, age, pos, market_value_eur FROM value_scouting "
+        "WHERE market_value_eur > 0",
+        conn,
+    )
+    conn.close()
+
+    df["pos_group"] = df["pos"].apply(_pos_group)
+    df["age_num"] = pd.to_numeric(
+        df["age"].astype(str).str.split("-").str[0], errors="coerce"
+    )
+    df = df[(df["pos_group"] == pos_group) & df["age_num"].between(16, 40)].copy()
+
+    if len(df) < 20:
+        return {"has_data": False}
+
+    # Filter to 19-38 to avoid extreme youth-premium distortion
+    df = df[df["age_num"].between(19, 38)].copy()
+    if len(df) < 20:
+        return {"has_data": False}
+
+    df["value_m"] = df["market_value_eur"] / 1e6
+
+    # Median-smoothed curve: groupby age → median value → rolling smooth
+    age_med = df.groupby("age_num")["market_value_eur"].median()
+    ages_int = age_med.index.values.astype(float)
+    med_vals = age_med.values / 1e6
+
+    # Peak age = age with highest median market value in the data
+    peak_age = int(age_med.idxmax())
+    peak_age = max(19, min(peak_age, 35))
+
+    # Polynomial fit to median values for smooth curve
+    coeffs = np.polyfit(ages_int, np.log1p(age_med.values), 2)
+    age_range = np.linspace(19, 38, 100)
+    curve_m = np.clip(np.expm1(np.polyval(coeffs, age_range)) / 1e6, 0, None)
+
+    return {
+        "has_data":        True,
+        "scatter_age":     df["age_num"].tolist(),
+        "scatter_value_m": df["value_m"].round(1).tolist(),
+        "scatter_player":  df["player"].tolist(),
+        "curve_age":       age_range.tolist(),
+        "curve_value_m":   curve_m.round(2).tolist(),
+        "med_age":         ages_int.tolist(),
+        "med_value_m":     [round(float(v), 2) for v in med_vals],
+        "peak_age":        peak_age,
+        "n_players":       len(df),
+        "pos_group":       pos_group,
+        "coeffs":          [float(c) for c in coeffs],
+    }
+
+
+def run_backtest_model() -> pd.DataFrame:
+    """
+    Temporal backtest: train on 2022-23 season stats only, evaluate via 5-fold OOF.
+    Compares historical-model accuracy vs full 4-season model on current TM values.
+    Saves results to scout.db backtest_results table.
+    """
+    import unicodedata
+    from xgboost import XGBRegressor
+    from sklearn.model_selection import cross_val_predict, KFold
+
+    conn = sqlite3.connect(DB_PATH)
+    raw_hist = pd.read_sql("SELECT * FROM players_raw WHERE season = '2223'", conn)
+    tm        = pd.read_sql("SELECT * FROM market_values", conn)
+    try:
+        cur_preds = pd.read_sql(
+            "SELECT player, predicted_value_eur AS full_pred_eur FROM value_scouting",
+            conn,
+        ).drop_duplicates("player")
+    except Exception:
+        cur_preds = pd.DataFrame()
+    conn.close()
+
+    if raw_hist.empty or tm.empty:
+        return pd.DataFrame()
+
+    def _norm(s):
+        s = unicodedata.normalize("NFKD", str(s).lower().strip())
+        return "".join(c for c in s if not unicodedata.combining(c))
+
+    tm["player_key"]       = tm["player_tm"].apply(_norm)
+    raw_hist["player_key"] = raw_hist["player"].apply(_norm)
+    raw_hist = raw_hist.drop_duplicates(subset=["player"]).copy()
+
+    merged = raw_hist.merge(
+        tm[["player_key", "market_value_eur"]].drop_duplicates("player_key"),
+        on="player_key", how="left",
+    )
+    merged["market_value_eur"] = pd.to_numeric(
+        merged["market_value_eur"], errors="coerce"
+    ).fillna(0)
+
+    df_hist = build_features(merged)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    records = []
+    for pos, feat_list in POS_FEATURES.items():
+        subset = df_hist[
+            (df_hist["pos_group"] == pos) & (df_hist["market_value_eur"] > 0)
+        ].copy()
+        if len(subset) < 20:
+            continue
+
+        feat_cols = [c for c in feat_list + ["age_factor", "league_tier"]
+                     if c in subset.columns]
+        if "age" in subset.columns:
+            subset["age_sq"] = subset["age"] ** 2
+            if "age_sq" not in feat_cols:
+                feat_cols = feat_cols + ["age_sq"]
+
+        subset["log_value"] = np.log1p(subset["market_value_eur"])
+        X = subset[feat_cols].fillna(0)
+        y = subset["log_value"].values
+
+        model = XGBRegressor(
+            n_estimators=300, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.7, min_child_weight=5,
+            reg_alpha=0.1, reg_lambda=2.0, random_state=42, verbosity=0,
+        )
+        oof_log = cross_val_predict(model, X, y, cv=kf)
+
+        out = subset[["player", "pos", "team", "league", "age",
+                       "market_value_eur"]].copy()
+        out["hist_pred_eur"] = np.expm1(oof_log).clip(min=100_000)
+        records.append(out)
+
+    if not records:
+        return pd.DataFrame()
+
+    result = pd.concat(records, ignore_index=True)
+
+    if not cur_preds.empty:
+        result = result.merge(cur_preds.drop_duplicates("player"), on="player", how="left")
+    else:
+        result["full_pred_eur"] = result["hist_pred_eur"]
+
+    result["hist_error_pct"] = (
+        (result["hist_pred_eur"] - result["market_value_eur"])
+        / result["market_value_eur"] * 100
+    ).round(1)
+    if "full_pred_eur" in result.columns:
+        full = pd.to_numeric(result["full_pred_eur"], errors="coerce").fillna(0)
+        result["full_error_pct"] = (
+            (full - result["market_value_eur"]) / result["market_value_eur"] * 100
+        ).round(1)
+
+    save_cols = [c for c in ["player", "pos", "team", "league", "age",
+                              "market_value_eur", "hist_pred_eur", "hist_error_pct",
+                              "full_pred_eur", "full_error_pct"] if c in result.columns]
+
+    conn = sqlite3.connect(DB_PATH)
+    result[save_cols].to_sql("backtest_results", conn, if_exists="replace", index=False)
+    conn.close()
+    print(f"[Backtest] {len(result)} players evaluated and saved")
+    return result[save_cols]
 
 
 def get_feature_importance(pos_group: str) -> pd.DataFrame:

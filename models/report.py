@@ -3,9 +3,11 @@ Scout report PDF generator — fpdf2-based.
 Generates a 1-page scout report for a given player.
 """
 
+import io
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fpdf import FPDF
 
@@ -32,6 +34,40 @@ MID_ROW  = (24, 24, 38)
 def _percentile_of(val: float, values: pd.Series) -> float:
     from scipy.stats import percentileofscore
     return round(percentileofscore(values.dropna().values, float(val), kind="rank"), 1)
+
+
+def _build_radar_png(labels: list, percentiles: list) -> bytes:
+    """Render a polar radar chart and return PNG bytes."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n = len(labels)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    vals = percentiles + [percentiles[0]]
+    angles_closed = angles + [angles[0]]
+
+    fig, ax = plt.subplots(figsize=(3.5, 3.5), subplot_kw={"polar": True})
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#1e1e2e")
+
+    ax.plot(angles_closed, vals, color="#7EB8F7", linewidth=1.8)
+    ax.fill(angles_closed, vals, color="#7EB8F7", alpha=0.25)
+
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, color="#cccccc", fontsize=7)
+    ax.set_yticks([25, 50, 75, 100])
+    ax.set_yticklabels(["25", "50", "75", "100"], color="#666666", fontsize=6)
+    ax.set_ylim(0, 100)
+    ax.tick_params(axis="x", pad=6)
+    ax.spines["polar"].set_color("#444444")
+    ax.grid(color="#444444", linewidth=0.5)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=130, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 def generate_scout_pdf(player_name: str) -> bytes:
@@ -183,9 +219,46 @@ def generate_scout_pdf(player_name: str) -> bytes:
 
         y += row_h
 
+    # ── Radar chart (matplotlib polar PNG) ───────────────────
+    try:
+        from scipy.stats import percentileofscore as _pof
+        from models.value_scouting import POS_RADAR_STATS, RADAR_STATS, INVERTED_RADAR_STATS
+
+        radar_def = POS_RADAR_STATS.get(pos_group, RADAR_STATS)
+        radar_labels, radar_vals = [], []
+        for lbl, col in radar_def.items():
+            if col in peers.columns:
+                pct = round(_pof(
+                    pd.to_numeric(peers[col], errors="coerce").dropna().values,
+                    float(pd.to_numeric(p.get(col, 0), errors="coerce") or 0),
+                    kind="rank",
+                ), 1)
+                if col in INVERTED_RADAR_STATS:
+                    pct = round(100.0 - pct, 1)
+            else:
+                pct = 50.0
+            radar_labels.append(lbl)
+            radar_vals.append(pct)
+
+        if radar_labels:
+            radar_png = _build_radar_png(radar_labels, radar_vals)
+            y += 6
+            pdf.set_text_color(*ACCENT)
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_xy(M, y)
+            pdf.cell(80, 7, "PERCENTILE RADAR", align="L")
+            y += 8
+            radar_w = 68
+            radar_h = 68
+            radar_x = W / 2 - radar_w / 2
+            pdf.image(io.BytesIO(radar_png), x=radar_x, y=y, w=radar_w, h=radar_h)
+            y += radar_h + 4
+    except Exception:
+        pass
+
     # ── Value assessment ──────────────────────────────────────
-    if actual_m > 0:
-        y += 7
+    if actual_m > 0 and y < (H - 45):
+        y += 2
         pdf.set_text_color(*ACCENT)
         pdf.set_font("Helvetica", "B", 10)
         pdf.set_xy(M, y)

@@ -13,3 +13,4 @@ lxml
 fpdf2
 scipy
 rapidfuzz
+matplotlib

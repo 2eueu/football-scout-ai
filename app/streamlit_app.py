@@ -17,7 +17,7 @@ def _bootstrap_db():
     DATA = Path(__file__).parent.parent / "data"
     # always_refresh: rebuilt locally before every push
     always_refresh = {"players_master", "value_scouting", "player_roles",
-                      "market_values", "league_factors"}
+                      "market_values", "league_factors", "model_metrics", "backtest_results"}
     tables = {
         "players_master":   DATA / "players_master.parquet",
         "value_scouting":   DATA / "value_scouting.parquet",
@@ -27,6 +27,8 @@ def _bootstrap_db():
         "player_roles":     DATA / "player_roles.parquet",
         "market_values":    DATA / "market_values.parquet",
         "league_factors":   DATA / "league_factors.parquet",
+        "model_metrics":    DATA / "model_metrics.parquet",
+        "backtest_results": DATA / "backtest_results.parquet",
     }
 
     if not DB.exists():
@@ -100,12 +102,8 @@ from models.value_scouting import (
     get_undervalued, get_similar_players,
     get_player_percentiles, get_player_role, RADAR_STATS, POS_RADAR_STATS,
     get_team_fit_players, get_all_teams, get_feature_importance,
+    get_league_factors, get_model_metrics, get_age_curve_data,
 )
-try:
-    from models.value_scouting import get_league_factors
-except ImportError:
-    def get_league_factors():
-        return pd.DataFrame()
 from models.report import generate_scout_pdf
 
 
@@ -189,6 +187,8 @@ with tab1:
     if "results" not in st.session_state:
         st.session_state.results = None
         st.session_state.filters = None
+    if "watchlist" not in st.session_state:
+        st.session_state.watchlist = []
 
     if search_clicked and query.strip():
         with st.spinner("Parsing query with AI..."):
@@ -232,12 +232,26 @@ with tab1:
             },
         )
 
-        st.download_button(
-            label="⬇ Download results as CSV",
-            data=display.to_csv(index=False).encode("utf-8"),
-            file_name="scout_results.csv",
-            mime="text/csv",
-        )
+        dl_col, wl_col = st.columns([2, 3])
+        with dl_col:
+            st.download_button(
+                label="⬇ Download results as CSV",
+                data=display.to_csv(index=False).encode("utf-8"),
+                file_name="scout_results.csv",
+                mime="text/csv",
+            )
+        with wl_col:
+            wl_add = st.multiselect(
+                "★ Add to Watchlist",
+                options=results["player"].tolist(),
+                default=[],
+                key="wl_add_select",
+            )
+            if wl_add:
+                new_players = [p for p in wl_add if p not in st.session_state.watchlist]
+                st.session_state.watchlist.extend(new_players)
+                if new_players:
+                    st.toast(f"Added {len(new_players)} player(s) to watchlist")
 
         # ── Percentile radar comparison ──────────────────────
         st.divider()
@@ -505,6 +519,88 @@ with tab1:
                 st.info("No trend data available for this player.")
 
 
+        # ── Watchlist section ─────────────────────────────────
+        if st.session_state.watchlist:
+            st.divider()
+            st.subheader("★ Watchlist")
+            wl_players = st.session_state.watchlist
+
+            wl_col1, wl_col2 = st.columns([4, 1])
+            with wl_col1:
+                st.caption(f"{len(wl_players)} player(s) saved")
+            with wl_col2:
+                if st.button("Clear watchlist", key="wl_clear"):
+                    st.session_state.watchlist = []
+                    st.rerun()
+
+            remove_p = st.multiselect("Remove from watchlist", wl_players, default=[], key="wl_remove")
+            if remove_p:
+                st.session_state.watchlist = [p for p in wl_players if p not in remove_p]
+                st.rerun()
+
+            if len(st.session_state.watchlist) >= 2:
+                wl_pct = get_player_percentiles(st.session_state.watchlist[:5])
+                if not wl_pct.empty:
+                    st.plotly_chart(_build_radar(wl_pct, height=430), use_container_width=True)
+
+            # Side-by-side stat table for watchlist players
+            if st.session_state.watchlist:
+                WATCH_STATS = [
+                    ("Goals/90",      "per_90_minutes_gls"),
+                    ("xG/90",         "xg_p90"),
+                    ("Assists/90",    "per_90_minutes_ast"),
+                    ("xA/90",         "xa_p90"),
+                    ("G+A/90",        "per_90_minutes_g_a"),
+                    ("Shots/90",      "standard_sh_90"),
+                    ("Tackles Won",   "performance_tklw"),
+                    ("Interceptions", "performance_int"),
+                ]
+                try:
+                    wl_names = st.session_state.watchlist[:6]
+                    conn = sqlite3.connect(DB_PATH)
+                    wl_master = pd.read_sql(
+                        f"SELECT * FROM players_master WHERE player IN ({','.join(['?']*len(wl_names))})",
+                        conn, params=wl_names,
+                    )
+                    wl_vs = pd.read_sql(
+                        f"SELECT player, market_value_eur, predicted_value_eur, undervalue_score "
+                        f"FROM value_scouting WHERE player IN ({','.join(['?']*len(wl_names))})",
+                        conn, params=wl_names,
+                    )
+                    conn.close()
+                    wl_master = wl_master.drop_duplicates("player").set_index("player")
+                    wl_vs = wl_vs.drop_duplicates("player").set_index("player")
+
+                    wl_rows = []
+                    for lbl, col in WATCH_STATS:
+                        row = {"Metric": lbl}
+                        for p in wl_names:
+                            if p in wl_master.index and col in wl_master.columns:
+                                v = pd.to_numeric(wl_master.loc[p, col], errors="coerce")
+                                row[p] = round(float(v), 3) if pd.notna(v) else "—"
+                            else:
+                                row[p] = "—"
+                        wl_rows.append(row)
+
+                    for lbl, col in [("Value (M€)", "market_value_eur"), ("Predicted (M€)", "predicted_value_eur"), ("Undervalue (%)", "undervalue_score")]:
+                        row = {"Metric": lbl}
+                        for p in wl_names:
+                            if p in wl_vs.index:
+                                v = pd.to_numeric(wl_vs.loc[p, col], errors="coerce")
+                                if col in ("market_value_eur", "predicted_value_eur"):
+                                    row[p] = f"{v/1e6:.1f}" if pd.notna(v) and v > 0 else "—"
+                                else:
+                                    row[p] = f"{v:+.1f}%" if pd.notna(v) else "—"
+                            else:
+                                row[p] = "—"
+                        wl_rows.append(row)
+
+                    wl_table = pd.DataFrame(wl_rows).set_index("Metric")
+                    st.dataframe(wl_table, use_container_width=True)
+                except Exception as e:
+                    st.info(f"Watchlist comparison unavailable: {e}")
+
+
 # ════════════════════════════════════════════════════════════
 # TAB 2 — Value Scouting
 # ════════════════════════════════════════════════════════════
@@ -682,6 +778,21 @@ with tab2:
                     badge_row += f' &nbsp;<span style="background:#2a2a1e;color:#F7C97E;padding:3px 10px;border-radius:20px;font-size:0.8rem;font-weight:600">{val_role}</span>'
                 st.markdown(badge_row, unsafe_allow_html=True)
 
+                # Get CV RMSE for CI bands
+                try:
+                    _metrics = get_model_metrics()
+                    _pos_grp_ci = "MF"
+                    _pos_raw_ci = str(row.get("pos", ""))
+                    if "FW" in _pos_raw_ci.upper():   _pos_grp_ci = "FW"
+                    elif "DF" in _pos_raw_ci.upper(): _pos_grp_ci = "DF"
+                    elif "GK" in _pos_raw_ci.upper(): _pos_grp_ci = "GK"
+                    _rmse_row = _metrics[_metrics["pos_group"] == _pos_grp_ci]
+                    _rmse_val = float(_rmse_row.iloc[0]["rmse"]) if not _rmse_row.empty else 0.0
+                    # CI in value space: predict * (e^rmse - 1)
+                    _ci_m = predict * (np.exp(_rmse_val) - 1) if _rmse_val > 0 else 0.0
+                except Exception:
+                    _ci_m, _rmse_val = 0.0, 0.0
+
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(
                     name="Actual market value",
@@ -691,11 +802,15 @@ with tab2:
                     width=0.3,
                 ))
                 fig_bar.add_trace(go.Bar(
-                    name="Model estimate",
+                    name=f"Model estimate (±1σ CI)",
                     x=["Value comparison"],
                     y=[predict],
                     marker_color="#7EF7A8",
                     width=0.3,
+                    error_y=dict(
+                        type="data", array=[_ci_m], arrayminus=[min(_ci_m, predict * 0.9)],
+                        visible=_ci_m > 0, color="#aaa", thickness=2, width=6,
+                    ),
                 ))
                 fig_bar.update_layout(
                     barmode="group", height=300,
@@ -705,6 +820,8 @@ with tab2:
                     legend=dict(orientation="h", y=-0.3),
                 )
                 fig_bar.update_yaxes(gridcolor="#222")
+                if _rmse_val > 0:
+                    st.caption(f"Error bars: ±1σ confidence interval (CV RMSE = {_rmse_val:.3f} log-scale, {_pos_grp_ci} model)")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
                 # ── Feature importance for this position model ──
@@ -794,6 +911,193 @@ with tab2:
                             "xA/90": st.column_config.NumberColumn("xA/90", format="%.3f"),
                         },
                     )
+
+    # ── Model Validation ─────────────────────────────────────
+    st.divider()
+    with st.expander("Model Validation — Backtest & CV RMSE", expanded=False):
+        st.subheader("Model Accuracy: Full 4-Season vs Historical (2022-23 Only)")
+        st.caption(
+            "Historical model trained on 2022-23 stats only (5-fold OOF cross_val_predict). "
+            "Full model trained on 4-season weighted averages. "
+            "Lower RMSE = better accuracy (log-scale)."
+        )
+        try:
+            metrics_df = get_model_metrics()
+            if not metrics_df.empty:
+                # RMSE comparison bar chart
+                try:
+                    _conn = sqlite3.connect(DB_PATH)
+                    bt_df = pd.read_sql(
+                        "SELECT pos, hist_pred_eur, full_pred_eur, market_value_eur "
+                        "FROM backtest_results WHERE market_value_eur > 0 "
+                        "AND hist_pred_eur IS NOT NULL AND full_pred_eur IS NOT NULL",
+                        _conn,
+                    )
+                    _conn.close()
+                except Exception:
+                    bt_df = pd.DataFrame()
+
+                rmse_rows = []
+                for _, mrow in metrics_df.iterrows():
+                    pos = mrow["pos_group"]
+                    full_rmse = mrow["rmse"]
+                    # Compute historical RMSE from backtest results
+                    hist_rmse = np.nan
+                    if not bt_df.empty:
+                        sub = bt_df[bt_df["pos"].str.upper().str.contains(pos, na=False)].copy()
+                        sub["hist_pred_eur"] = pd.to_numeric(sub["hist_pred_eur"], errors="coerce")
+                        sub["full_pred_eur"] = pd.to_numeric(sub["full_pred_eur"], errors="coerce")
+                        sub = sub.dropna(subset=["hist_pred_eur", "full_pred_eur"])
+                        if len(sub) >= 5:
+                            log_true  = np.log1p(sub["market_value_eur"].values)
+                            log_hist  = np.log1p(sub["hist_pred_eur"].values)
+                            hist_rmse = float(np.sqrt(np.mean((log_hist - log_true)**2)))
+                    rmse_rows.append({"Position": pos, "Historical (2223)": round(hist_rmse, 4) if not np.isnan(hist_rmse) else None, "Full 4-Season": round(full_rmse, 4), "N train": mrow["n_train"]})
+
+                rmse_display = pd.DataFrame(rmse_rows)
+
+                fig_rmse = go.Figure()
+                fig_rmse.add_trace(go.Bar(
+                    name="Historical (2022-23 only)",
+                    x=rmse_display["Position"],
+                    y=rmse_display["Historical (2223)"],
+                    marker_color="#F77E7E",
+                ))
+                fig_rmse.add_trace(go.Bar(
+                    name="Full 4-Season Model",
+                    x=rmse_display["Position"],
+                    y=rmse_display["Full 4-Season"],
+                    marker_color="#7EF7A8",
+                ))
+                fig_rmse.update_layout(
+                    barmode="group", height=320,
+                    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    font_color="#ffffff", yaxis_title="RMSE (log-scale)",
+                    margin=dict(t=20, b=30),
+                    legend=dict(orientation="h", y=-0.25),
+                )
+                fig_rmse.update_yaxes(gridcolor="#222")
+                st.plotly_chart(fig_rmse, use_container_width=True)
+
+                # Summary improvement
+                valid = [(r["Historical (2223)"], r["Full 4-Season"]) for _, r in rmse_display.iterrows()
+                         if r["Historical (2223)"] is not None and r["Historical (2223)"] > 0]
+                if valid:
+                    avg_improvement = np.mean([(h - f) / h * 100 for h, f in valid])
+                    st.metric(
+                        "Average RMSE improvement from multi-season weighting",
+                        f"{avg_improvement:.1f}%",
+                        help="Positive = full model is more accurate than single-season model",
+                    )
+
+                st.dataframe(rmse_display, use_container_width=True, hide_index=True)
+
+            if not bt_df.empty:
+                st.divider()
+                st.subheader("Actual vs Predicted — Backtest Scatter")
+                bt_plot = bt_df.copy()
+                bt_plot["Actual (M€)"]     = bt_plot["market_value_eur"] / 1e6
+                bt_plot["Historical (M€)"] = pd.to_numeric(bt_plot["hist_pred_eur"], errors="coerce") / 1e6
+                bt_plot["Full (M€)"]       = pd.to_numeric(bt_plot["full_pred_eur"], errors="coerce") / 1e6
+                bt_plot = bt_plot.dropna(subset=["Historical (M€)", "Full (M€)"])
+
+                bt_col1, bt_col2 = st.columns(2)
+                with bt_col1:
+                    st.caption("Historical model (2022-23 only)")
+                    fig_bt1 = px.scatter(
+                        bt_plot, x="Actual (M€)", y="Historical (M€)", color="pos",
+                        opacity=0.55, height=340,
+                        color_discrete_map={"FW": "#7EB8F7", "MF": "#F7C97E", "DF": "#7EF7A8", "GK": "#F77E7E"},
+                    )
+                    _mx1 = max(bt_plot["Actual (M€)"].max(), bt_plot["Historical (M€)"].max())
+                    fig_bt1.add_trace(go.Scatter(x=[0, _mx1], y=[0, _mx1], mode="lines",
+                                                  line=dict(color="#555", dash="dash", width=1), showlegend=False))
+                    fig_bt1.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                                           font_color="#ffffff", margin=dict(t=10, b=30))
+                    fig_bt1.update_xaxes(gridcolor="#222")
+                    fig_bt1.update_yaxes(gridcolor="#222")
+                    st.plotly_chart(fig_bt1, use_container_width=True)
+                with bt_col2:
+                    st.caption("Full 4-season model")
+                    fig_bt2 = px.scatter(
+                        bt_plot, x="Actual (M€)", y="Full (M€)", color="pos",
+                        opacity=0.55, height=340,
+                        color_discrete_map={"FW": "#7EB8F7", "MF": "#F7C97E", "DF": "#7EF7A8", "GK": "#F77E7E"},
+                    )
+                    _mx2 = max(bt_plot["Actual (M€)"].max(), bt_plot["Full (M€)"].max())
+                    fig_bt2.add_trace(go.Scatter(x=[0, _mx2], y=[0, _mx2], mode="lines",
+                                                  line=dict(color="#555", dash="dash", width=1), showlegend=False))
+                    fig_bt2.update_layout(paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                                           font_color="#ffffff", margin=dict(t=10, b=30))
+                    fig_bt2.update_xaxes(gridcolor="#222")
+                    fig_bt2.update_yaxes(gridcolor="#222")
+                    st.plotly_chart(fig_bt2, use_container_width=True)
+
+        except Exception as e:
+            st.info(f"Model validation data unavailable: {e}")
+
+    # ── Age Curve ─────────────────────────────────────────────
+    st.divider()
+    with st.expander("Age-Value Curve — Position-Specific", expanded=False):
+        st.subheader("Player Value Peak Age by Position")
+        st.caption("Polynomial regression (degree 2) of market value vs age, fitted on players with TM valuations")
+
+        ac_pos = st.selectbox("Position group", ["FW", "MF", "DF", "GK"], key="age_curve_pos")
+
+        try:
+            ac_data = get_age_curve_data(ac_pos)
+            if ac_data.get("has_data"):
+                fig_ac = go.Figure()
+                # Scatter: individual players (background)
+                fig_ac.add_trace(go.Scatter(
+                    x=ac_data["scatter_age"], y=ac_data["scatter_value_m"],
+                    mode="markers", name="Individual players",
+                    text=ac_data["scatter_player"],
+                    marker=dict(color="#7EB8F7", opacity=0.30, size=4),
+                    hovertemplate="%{text}<br>Age: %{x}<br>Value: €%{y:.1f}M<extra></extra>",
+                ))
+                # Median values per age
+                if "med_age" in ac_data and "med_value_m" in ac_data:
+                    fig_ac.add_trace(go.Scatter(
+                        x=ac_data["med_age"], y=ac_data["med_value_m"],
+                        mode="markers+lines", name="Median value by age",
+                        marker=dict(color="#F77E7E", size=7),
+                        line=dict(color="#F77E7E", width=1.5, dash="dot"),
+                        hovertemplate="Age %{x}: median €%{y:.1f}M<extra></extra>",
+                    ))
+                # Polynomial trend curve
+                fig_ac.add_trace(go.Scatter(
+                    x=ac_data["curve_age"], y=ac_data["curve_value_m"],
+                    mode="lines", name="Polynomial trend",
+                    line=dict(color="#F7C97E", width=2.5),
+                ))
+                # Peak age marker on median line
+                peak = ac_data["peak_age"]
+                fig_ac.add_vline(
+                    x=peak, line_dash="dash", line_color="#7EF7A8", line_width=1.5,
+                    annotation_text=f"Median peak: {peak}", annotation_position="top right",
+                    annotation_font_color="#7EF7A8",
+                )
+                fig_ac.update_layout(
+                    xaxis_title="Age", yaxis_title="Market Value (M€)",
+                    height=420,
+                    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    font_color="#ffffff",
+                    legend=dict(orientation="h", y=-0.18),
+                    margin=dict(t=20, b=60),
+                )
+                fig_ac.update_xaxes(gridcolor="#222")
+                fig_ac.update_yaxes(gridcolor="#222")
+                st.plotly_chart(fig_ac, use_container_width=True)
+                st.caption(
+                    f"n = {ac_data['n_players']} {ac_pos} players with TM valuations. "
+                    f"Median peak age = {peak}. "
+                    "Note: youth premium inflates values for young players — market value peak reflects transfer market dynamics, not performance peak."
+                )
+            else:
+                st.info(f"Not enough {ac_pos} data for age curve.")
+        except Exception as e:
+            st.info(f"Age curve unavailable: {e}")
 
 
 # ════════════════════════════════════════════════════════════
