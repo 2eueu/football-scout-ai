@@ -126,6 +126,7 @@ BASE_FEATURES = [
     "performance_tklw", "performance_int",
     "performance_fld", "performance_fls",
     "performance_crdy",
+    "xg_p90", "npxg_p90", "xa_p90",
 ]
 
 
@@ -305,16 +306,22 @@ def get_undervalued(
     df["predicted_value_m"] = (df["predicted_value_eur"] / 1e6).round(1)
     df["undervalue_score"]  = df["undervalue_score"].round(1)
 
-    return df[[
+    out_cols = [
         "player", "team", "league", "pos", "age",
         "market_value_m", "predicted_value_m", "undervalue_score",
         "per_90_minutes_gls", "per_90_minutes_ast",
-    ]].rename(columns={
-        "market_value_m":     "실제몸값(M€)",
-        "predicted_value_m":  "예측몸값(M€)",
-        "undervalue_score":   "저평가점수(%)",
-        "per_90_minutes_gls": "골/90",
-        "per_90_minutes_ast": "어시스트/90",
+        "xg_p90", "npxg_p90", "xa_p90",
+    ]
+    out_cols = [c for c in out_cols if c in df.columns]
+    return df[out_cols].rename(columns={
+        "market_value_m":     "Actual (M€)",
+        "predicted_value_m":  "Predicted (M€)",
+        "undervalue_score":   "Undervalue (%)",
+        "per_90_minutes_gls": "Goals/90",
+        "per_90_minutes_ast": "Assists/90",
+        "xg_p90":             "xG/90",
+        "npxg_p90":           "npxG/90",
+        "xa_p90":             "xA/90",
     })
 
 
@@ -322,6 +329,7 @@ SIMILARITY_FEATURES = [
     "per_90_minutes_gls", "per_90_minutes_ast", "per_90_minutes_g_a",
     "standard_sh_90", "performance_tklw", "performance_int",
     "playing_time_min", "age_factor", "league_tier",
+    "xg_p90", "npxg_p90", "xa_p90",
 ]
 
 
@@ -393,7 +401,8 @@ def get_similar_players(
 
     cols = ["player", "team", "league", "pos", "age",
             "market_value_m", "predicted_value_m", "undervalue_score",
-            "similarity_pct", "per_90_minutes_gls", "per_90_minutes_ast"]
+            "similarity_pct", "per_90_minutes_gls", "per_90_minutes_ast",
+            "xg_p90", "npxg_p90", "xa_p90"]
     cols = [c for c in cols if c in result.columns]
     return result[cols].rename(columns={
         "market_value_m":     "Actual (M€)",
@@ -402,6 +411,9 @@ def get_similar_players(
         "similarity_pct":     "Similarity (%)",
         "per_90_minutes_gls": "Goals/90",
         "per_90_minutes_ast": "Assists/90",
+        "xg_p90":             "xG/90",
+        "npxg_p90":           "npxG/90",
+        "xa_p90":             "xA/90",
     })
 
 

@@ -20,6 +20,7 @@ def _bootstrap_db():
         "value_scouting":   DATA / "value_scouting.parquet",
         "statsbomb_events": DATA / "statsbomb_events.parquet",
         "players_raw":      DATA / "players_raw.parquet",
+        "understat_xg":     DATA / "understat_xg.parquet",
     }
 
     if not DB.exists():
@@ -79,7 +80,7 @@ st.markdown("""
 
 st.markdown('<p class="title">⚽ Football Scout AI</p>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="subtitle">Big 5 leagues · Multi-season weighted data (22/23 – 25/26) · XGBoost value model · NL search</p>',
+    '<p class="subtitle">Big 5 leagues · Multi-season weighted data (22/23 – 25/26) · XGBoost value model + xG/xA · NL search</p>',
     unsafe_allow_html=True,
 )
 st.divider()
@@ -184,6 +185,18 @@ with tab1:
         detail_name = st.selectbox("Select player", player_names, key="detail_select")
         if detail_name:
             row = results[results["player"] == detail_name].iloc[0]
+            # Look up xG data for this player
+            try:
+                _conn = sqlite3.connect(Path(__file__).parent.parent / "scout.db")
+                _xg = pd.read_sql(
+                    "SELECT xg_p90, npxg_p90, xa_p90 FROM players_master WHERE player = ? LIMIT 1",
+                    _conn, params=[detail_name]
+                )
+                _conn.close()
+                _xg_row = _xg.iloc[0] if not _xg.empty else None
+            except Exception:
+                _xg_row = None
+
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             for col, (lbl, val) in zip(
                 [c1, c2, c3, c4, c5, c6],
@@ -197,6 +210,12 @@ with tab1:
                         f'<div class="stat-lbl">{lbl}</div></div>',
                         unsafe_allow_html=True,
                     )
+
+            if _xg_row is not None and pd.notna(_xg_row.get("xg_p90", None)):
+                xg_c1, xg_c2, xg_c3 = st.columns(3)
+                xg_c1.metric("xG/90", f"{_xg_row['xg_p90']:.3f}")
+                xg_c2.metric("npxG/90", f"{_xg_row['npxg_p90']:.3f}")
+                xg_c3.metric("xA/90", f"{_xg_row['xa_p90']:.3f}")
 
             detail = get_player_detail(detail_name)
             sb = detail.get("statsbomb")
@@ -409,13 +428,16 @@ with tab2:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "저평가점수(%)": st.column_config.ProgressColumn(
+                    "Undervalue (%)": st.column_config.ProgressColumn(
                         "Undervalue (%)", min_value=0, max_value=100, format="%.1f%%"
                     ),
-                    "골/90": st.column_config.NumberColumn("Goals/90", format="%.2f"),
-                    "어시스트/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
-                    "실제몸값(M€)": st.column_config.NumberColumn("Actual (M€)", format="%.1f"),
-                    "예측몸값(M€)": st.column_config.NumberColumn("Predicted (M€)", format="%.1f"),
+                    "Goals/90": st.column_config.NumberColumn("Goals/90", format="%.2f"),
+                    "Assists/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
+                    "Actual (M€)": st.column_config.NumberColumn("Actual (M€)", format="%.1f"),
+                    "Predicted (M€)": st.column_config.NumberColumn("Predicted (M€)", format="%.1f"),
+                    "xG/90": st.column_config.NumberColumn("xG/90", format="%.3f"),
+                    "npxG/90": st.column_config.NumberColumn("npxG/90", format="%.3f"),
+                    "xA/90": st.column_config.NumberColumn("xA/90", format="%.3f"),
                 },
             )
 
@@ -427,9 +449,9 @@ with tab2:
 
             if selected_val:
                 row = df_val[df_val["player"] == selected_val].iloc[0]
-                actual  = row["실제몸값(M€)"]
-                predict = row["예측몸값(M€)"]
-                score   = row["저평가점수(%)"]
+                actual  = row["Actual (M€)"]
+                predict = row["Predicted (M€)"]
+                score   = row["Undervalue (%)"]
                 tag     = "tag-under" if score > 0 else "tag-over"
                 label   = f"Undervalued +{score:.1f}%" if score > 0 else f"Overvalued {score:.1f}%"
 
@@ -493,5 +515,8 @@ with tab2:
                             "Assists/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
                             "Actual (M€)": st.column_config.NumberColumn("Actual (M€)", format="%.1f"),
                             "Predicted (M€)": st.column_config.NumberColumn("Predicted (M€)", format="%.1f"),
+                            "xG/90": st.column_config.NumberColumn("xG/90", format="%.3f"),
+                            "npxG/90": st.column_config.NumberColumn("npxG/90", format="%.3f"),
+                            "xA/90": st.column_config.NumberColumn("xA/90", format="%.3f"),
                         },
                     )
