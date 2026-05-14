@@ -161,11 +161,11 @@ def get_form_trend(player_name: str) -> dict:
     slope = float(np.polyfit(x, recent, 1)[0])
 
     if slope > 1.5:
-        trend = "상승 ↑"
+        trend = "Rising ↑"
     elif slope < -1.5:
-        trend = "하락 ↓"
+        trend = "Falling ↓"
     else:
-        trend = "안정 →"
+        trend = "Stable →"
 
     prediction = None
     if len(series) >= WINDOW:
@@ -236,13 +236,13 @@ def get_season_trend(player_name: str) -> dict:
     if len(gls) >= 2:
         slope = float(np.polyfit(range(len(gls)), gls, 1)[0])
         if slope > 0.05:
-            trend = "상승 ↑"
+            trend = "Rising ↑"
         elif slope < -0.05:
-            trend = "하락 ↓"
+            trend = "Falling ↓"
         else:
-            trend = "안정 →"
+            trend = "Stable →"
     else:
-        trend = "안정 →"
+        trend = "Stable →"
 
     return {
         "has_data": True,

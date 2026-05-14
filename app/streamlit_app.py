@@ -4,6 +4,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import json
 import sqlite3
+import os
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
@@ -24,7 +25,7 @@ def _bootstrap_db():
     }
     missing = [name for name, path in tables.items() if not path.exists()]
     if missing:
-        st.error(f"데이터 파일 누락: {missing}")
+        st.error(f"Missing data files: {missing}")
         st.stop()
     conn = sqlite3.connect(DB)
     for table, path in tables.items():
@@ -33,8 +34,6 @@ def _bootstrap_db():
 
 _bootstrap_db()
 
-# ── inject Streamlit secrets into env so existing model code finds the key ──
-import os
 if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
     os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
 
@@ -67,81 +66,81 @@ st.markdown("""
 
 st.markdown('<p class="title">⚽ Football Scout AI</p>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="subtitle">Big 5 리그 멀티시즌(22-23 ~ 25-26) 가중 평균 데이터 기반</p>',
+    '<p class="subtitle">Big 5 leagues · Multi-season weighted data (22/23 – 25/26) · XGBoost value model · NL search</p>',
     unsafe_allow_html=True,
 )
 st.divider()
 
-tab1, tab2 = st.tabs(["🔍 선수 검색", "💰 Value Scouting"])
+tab1, tab2 = st.tabs(["🔍 Player Search", "💰 Value Scouting"])
 
 
 # ════════════════════════════════════════════════════════════
-# TAB 1 — 선수 검색
+# TAB 1 — Player Search
 # ════════════════════════════════════════════════════════════
 with tab1:
     col_input, col_btn = st.columns([5, 1])
     with col_input:
         query = st.text_input(
-            label="검색",
-            placeholder="예: 골 잘 넣는 20대 초반 공격수 / 프리미어리그 압박 강한 미드필더",
+            label="Search",
+            placeholder="e.g. young pressing midfielder in the Bundesliga / clinical striker under 25 in Ligue 1",
             label_visibility="collapsed",
             key="search_query",
         )
     with col_btn:
-        search_clicked = st.button("검색", use_container_width=True, type="primary", key="search_btn")
+        search_clicked = st.button("Search", use_container_width=True, type="primary", key="search_btn")
 
     if "results" not in st.session_state:
         st.session_state.results = None
         st.session_state.filters = None
 
     if search_clicked and query.strip():
-        with st.spinner("AI가 조건을 분석하는 중..."):
+        with st.spinner("Parsing query with AI..."):
             try:
                 filters = parse_query(query)
                 results = search_players(filters)
                 st.session_state.results = results
                 st.session_state.filters = filters
             except Exception as e:
-                st.error(f"검색 오류: {e}")
+                st.error(f"Search error: {e}")
 
     if st.session_state.results is not None:
         results: pd.DataFrame = st.session_state.results
         filters = st.session_state.filters
 
-        with st.expander("AI 파싱 결과", expanded=False):
+        with st.expander("Parsed filters", expanded=False):
             st.code(json.dumps(filters, ensure_ascii=False, indent=2), language="json")
 
         if results.empty:
-            st.warning("조건에 맞는 선수가 없어요. 조건을 완화해보세요.")
+            st.warning("No players found. Try relaxing the filters.")
             st.stop()
 
-        st.markdown(f"**{len(results)}명** 검색됨")
+        st.markdown(f"**{len(results)} players** found")
 
         display = results.rename(columns={
-            "player": "선수", "team": "팀", "pos": "포지션",
-            "age": "나이", "league": "리그", "minutes": "출전(분)",
-            "goals_p90": "골/90", "assists_p90": "어시스트/90",
-            "total_goals": "총골", "total_assists": "총어시스트",
-            "tackles_won": "태클", "interceptions": "인터셉트", "fouls": "파울",
+            "player": "Player", "team": "Club", "pos": "Position",
+            "age": "Age", "league": "League", "minutes": "Minutes",
+            "goals_p90": "Goals/90", "assists_p90": "Assists/90",
+            "total_goals": "Goals", "total_assists": "Assists",
+            "tackles_won": "Tackles", "interceptions": "Interceptions", "fouls": "Fouls",
         })
         st.dataframe(
             display, use_container_width=True, hide_index=True,
             column_config={
-                "골/90": st.column_config.ProgressColumn("골/90", min_value=0, max_value=1.5, format="%.2f"),
-                "어시스트/90": st.column_config.ProgressColumn("어시스트/90", min_value=0, max_value=1.0, format="%.2f"),
+                "Goals/90": st.column_config.ProgressColumn("Goals/90", min_value=0, max_value=1.5, format="%.2f"),
+                "Assists/90": st.column_config.ProgressColumn("Assists/90", min_value=0, max_value=1.0, format="%.2f"),
             },
         )
 
-        # ── 선수 비교 레이더 차트 ────────────────────────────
+        # ── Player comparison radar ──────────────────────────
         st.divider()
-        st.subheader("선수 비교")
+        st.subheader("Player Comparison")
         player_names = results["player"].tolist()
         default = player_names[:2] if len(player_names) >= 2 else player_names
-        selected = st.multiselect("비교할 선수 선택 (최대 3명)", player_names, default=default, max_selections=3, key="compare_select")
+        selected = st.multiselect("Select players to compare (max 3)", player_names, default=default, max_selections=3, key="compare_select")
 
         if len(selected) >= 2:
             raw_cols = ["goals_p90", "assists_p90", "tackles_won", "interceptions", "minutes"]
-            labels   = ["골/90", "어시스트/90", "태클", "인터셉트", "출전시간"]
+            labels   = ["Goals/90", "Assists/90", "Tackles", "Interceptions", "Minutes"]
             colors   = ["#7EB8F7", "#F7C97E", "#7EF7A8"]
             norm = results[["player"] + raw_cols].copy()
             for col in raw_cols:
@@ -166,18 +165,18 @@ with tab1:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # ── 선수 상세 ────────────────────────────────────────
+        # ── Player detail ────────────────────────────────────
         st.divider()
-        st.subheader("선수 상세")
-        detail_name = st.selectbox("선수 선택", player_names, key="detail_select")
+        st.subheader("Player Detail")
+        detail_name = st.selectbox("Select player", player_names, key="detail_select")
         if detail_name:
             row = results[results["player"] == detail_name].iloc[0]
             c1, c2, c3, c4, c5, c6 = st.columns(6)
             for col, (lbl, val) in zip(
                 [c1, c2, c3, c4, c5, c6],
-                [("팀", row["team"]), ("포지션", row["pos"]), ("나이", str(row["age"])),
-                 ("출전(분)", f"{int(row['minutes']):,}"), ("골/90", f"{row['goals_p90']:.2f}"),
-                 ("어시스트/90", f"{row['assists_p90']:.2f}")],
+                [("Club", row["team"]), ("Position", row["pos"]), ("Age", str(row["age"])),
+                 ("Minutes", f"{int(row['minutes']):,}"), ("Goals/90", f"{row['goals_p90']:.2f}"),
+                 ("Assists/90", f"{row['assists_p90']:.2f}")],
             ):
                 with col:
                     st.markdown(
@@ -189,34 +188,33 @@ with tab1:
             detail = get_player_detail(detail_name)
             sb = detail.get("statsbomb")
             if sb and sb.get("matches_played", 0) > 0:
-                st.markdown(f"\n**StatsBomb 이벤트 ({int(sb['matches_played'])}경기)**")
+                st.markdown(f"\n**StatsBomb event data ({int(sb['matches_played'])} matches)**")
                 s1, s2, s3, s4, s5 = st.columns(5)
                 for col, (lbl, key) in zip(
                     [s1, s2, s3, s4, s5],
-                    [("슈팅","total_shots"),("패스","total_passes"),
-                     ("압박","total_pressures"),("드리블","total_dribbles"),("태클","total_tackles")],
+                    [("Shots","total_shots"),("Passes","total_passes"),
+                     ("Pressures","total_pressures"),("Dribbles","total_dribbles"),("Tackles","total_tackles")],
                 ):
                     with col:
                         st.metric(lbl, int(sb.get(key) or 0))
 
-            # 폼 트렌드
+            # Form trend
             st.divider()
-            with st.spinner("폼 분석 중..."):
+            with st.spinner("Analysing form..."):
                 form = get_form_trend(detail_name)
                 season_data = get_season_trend(detail_name)
 
             if form.get("has_data"):
-                # StatsBomb 경기별 LSTM 폼
-                st.subheader("폼 트렌드 (LSTM — 경기별)")
+                st.subheader("Match-by-Match Form (LSTM)")
                 t1, t2, t3 = st.columns(3)
-                t1.metric("트렌드", form["trend"])
-                t2.metric("최근 5경기 기울기", form["slope"])
-                t3.metric("다음 경기 예측", form["prediction"] or "N/A")
+                t1.metric("Trend", form["trend"])
+                t2.metric("Last 5 slope", form["slope"])
+                t3.metric("Next match prediction", form["prediction"] or "N/A")
 
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(
                     x=form["match_ids"], y=form["scores"],
-                    mode="lines+markers", name="폼 스코어",
+                    mode="lines+markers", name="Form score",
                     line=dict(color="#7EB8F7", width=2), marker=dict(size=6),
                 ))
                 scores_arr = np.array(form["scores"])
@@ -224,17 +222,17 @@ with tab1:
                     ma = np.convolve(scores_arr, np.ones(3)/3, mode="valid")
                     fig2.add_trace(go.Scatter(
                         x=list(range(3, len(scores_arr)+1)), y=ma.tolist(),
-                        mode="lines", name="3경기 이동평균",
+                        mode="lines", name="3-match MA",
                         line=dict(color="#F7C97E", width=2, dash="dash"),
                     ))
                 if form["prediction"] is not None:
                     fig2.add_trace(go.Scatter(
                         x=[len(form["match_ids"])+1], y=[form["prediction"]],
-                        mode="markers", name="다음 경기 예측 (LSTM)",
+                        mode="markers", name="Next match (LSTM)",
                         marker=dict(color="#7EF7A8", size=12, symbol="star"),
                     ))
                 fig2.update_layout(
-                    xaxis_title="경기", yaxis_title="폼 스코어", height=350,
+                    xaxis_title="Match", yaxis_title="Form Score", height=350,
                     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
                     font_color="#ffffff", legend=dict(orientation="h", y=-0.2),
                     margin=dict(t=20, b=60),
@@ -242,35 +240,34 @@ with tab1:
                 fig2.update_xaxes(gridcolor="#333")
                 fig2.update_yaxes(gridcolor="#333")
                 st.plotly_chart(fig2, use_container_width=True)
-                st.caption("폼 스코어 = 슈팅×2 + 드리블×1.5 + 태클×1 + 인터셉트×1 + 압박×0.5 + 패스×0.3")
+                st.caption("Form score = Shots×2 + Dribbles×1.5 + Tackles×1 + Interceptions×1 + Pressures×0.5 + Passes×0.3")
 
             if season_data.get("has_data"):
-                st.subheader("멀티시즌 퍼포먼스 추세 (22-23 ~ 25-26)")
+                st.subheader("Multi-Season Performance Trend (22/23 – 25/26)")
                 s1, s2 = st.columns(2)
                 with s1:
-                    st.metric("트렌드", season_data["trend"])
+                    st.metric("Trend", season_data["trend"])
                 with s2:
-                    seasons_str = " → ".join(season_data["seasons"])
-                    st.caption(f"시즌: {seasons_str}")
+                    st.caption("Seasons: " + " → ".join(season_data["seasons"]))
 
                 fig3 = go.Figure()
                 fig3.add_trace(go.Scatter(
                     x=season_data["seasons"], y=season_data["gls_p90"],
-                    mode="lines+markers", name="골/90",
+                    mode="lines+markers", name="Goals/90",
                     line=dict(color="#7EB8F7", width=2), marker=dict(size=8),
                 ))
                 fig3.add_trace(go.Scatter(
                     x=season_data["seasons"], y=season_data["ast_p90"],
-                    mode="lines+markers", name="어시스트/90",
+                    mode="lines+markers", name="Assists/90",
                     line=dict(color="#F7C97E", width=2), marker=dict(size=8),
                 ))
                 fig3.add_trace(go.Scatter(
                     x=season_data["seasons"], y=season_data["g_a_p90"],
-                    mode="lines+markers", name="공격포인트/90",
+                    mode="lines+markers", name="G+A/90",
                     line=dict(color="#7EF7A8", width=2, dash="dot"), marker=dict(size=6),
                 ))
                 fig3.update_layout(
-                    xaxis_title="시즌", yaxis_title="per 90분", height=320,
+                    xaxis_title="Season", yaxis_title="per 90 min", height=320,
                     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
                     font_color="#ffffff", legend=dict(orientation="h", y=-0.25),
                     margin=dict(t=20, b=70),
@@ -280,48 +277,48 @@ with tab1:
                 st.plotly_chart(fig3, use_container_width=True)
 
                 min_data = dict(zip(season_data["seasons"], season_data["minutes"]))
-                st.caption("출전: " + "  |  ".join(f"{s}: {m}분" for s, m in min_data.items()))
+                st.caption("Minutes: " + "  |  ".join(f"{s}: {m}" for s, m in min_data.items()))
 
             elif not form.get("has_data"):
-                st.info("트렌드 데이터가 없는 선수입니다.")
+                st.info("No trend data available for this player.")
 
 
 # ════════════════════════════════════════════════════════════
 # TAB 2 — Value Scouting
 # ════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown("### 저평가 선수 발굴")
-    st.caption("XGBoost 모델이 퍼포먼스 기반 적정 몸값을 예측 — 실제 시장가치보다 예측값이 높은 선수가 저평가 선수")
+    st.markdown("### Undervalued Player Detection")
+    st.caption("XGBoost model predicts performance-based fair value — players where predicted > actual market value are flagged as undervalued")
 
-    # ── 필터 ─────────────────────────────────────────────────
+    # ── Filters ──────────────────────────────────────────────
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        budget = st.slider("최대 예산 (M€)", min_value=1, max_value=150, value=30, step=1)
+        budget = st.slider("Max budget (M€)", min_value=1, max_value=150, value=30, step=1)
     with f2:
-        pos_filter = st.selectbox("포지션", ["전체", "FW", "MF", "DF", "GK"])
+        pos_filter = st.selectbox("Position", ["All", "FW", "MF", "DF", "GK"])
     with f3:
-        league_filter = st.selectbox("리그", [
-            "전체", "ENG-Premier League", "ESP-La Liga",
+        league_filter = st.selectbox("League", [
+            "All", "ENG-Premier League", "ESP-La Liga",
             "GER-Bundesliga", "ITA-Serie A", "FRA-Ligue 1",
         ])
     with f4:
-        age_filter = st.slider("최대 나이", min_value=16, max_value=38, value=28)
+        age_filter = st.slider("Max age", min_value=16, max_value=38, value=28)
 
-    top_n = st.slider("표시 인원", min_value=5, max_value=50, value=20)
+    top_n = st.slider("Results to show", min_value=5, max_value=50, value=20)
 
-    if st.button("분석 실행", type="primary", key="value_btn"):
-        with st.spinner("저평가 선수 분석 중..."):
+    if st.button("Run analysis", type="primary", key="value_btn"):
+        with st.spinner("Scanning for undervalued players..."):
             try:
                 df_val = get_undervalued(
                     max_value_eur=budget * 1_000_000,
-                    position=None if pos_filter == "전체" else pos_filter,
-                    league=None if league_filter == "전체" else league_filter,
+                    position=None if pos_filter == "All" else pos_filter,
+                    league=None if league_filter == "All" else league_filter,
                     age_max=age_filter,
                     top_n=top_n,
                 )
                 st.session_state.value_results = df_val
             except Exception as e:
-                st.error(f"오류: {e}")
+                st.error(f"Error: {e}")
 
     if "value_results" not in st.session_state:
         st.session_state.value_results = None
@@ -330,17 +327,15 @@ with tab2:
         df_val: pd.DataFrame = st.session_state.value_results
 
         if df_val.empty:
-            st.warning("조건에 맞는 선수가 없어요.")
+            st.warning("No players found. Try adjusting the filters.")
         else:
-            st.markdown(f"**{len(df_val)}명** 발굴됨")
+            st.markdown(f"**{len(df_val)} players** identified")
 
-            # ── 산점도: 실제 vs 예측 몸값 ────────────────────
+            # ── Scatter: actual vs predicted value ───────────
             st.divider()
-            st.subheader("실제 몸값 vs 예측 몸값")
-            st.caption("대각선 위 = 저평가 (예측 > 실제) | 대각선 아래 = 고평가")
+            st.subheader("Actual vs Predicted Market Value")
+            st.caption("Above the line = undervalued (predicted > actual) | Below = overvalued")
 
-            # raw 데이터 다시 로드 (scatter용)
-            import sqlite3, os
             DB_PATH = Path(__file__).parent.parent / "scout.db"
             conn = sqlite3.connect(DB_PATH)
             scatter_df = pd.read_sql(
@@ -354,19 +349,19 @@ with tab2:
             )
             conn.close()
 
-            scatter_df["실제(M€)"]  = scatter_df["market_value_eur"] / 1e6
-            scatter_df["예측(M€)"]  = scatter_df["predicted_value_eur"] / 1e6
-            scatter_df["저평가(%)"] = scatter_df["undervalue_score"].round(1)
-            scatter_df["골/90"]     = pd.to_numeric(scatter_df["per_90_minutes_gls"], errors="coerce").fillna(0).round(2)
+            scatter_df["Actual (M€)"]    = scatter_df["market_value_eur"] / 1e6
+            scatter_df["Predicted (M€)"] = scatter_df["predicted_value_eur"] / 1e6
+            scatter_df["Undervalue (%)"] = scatter_df["undervalue_score"].round(1)
+            scatter_df["Goals/90"]       = pd.to_numeric(scatter_df["per_90_minutes_gls"], errors="coerce").fillna(0).round(2)
 
             fig_s = px.scatter(
                 scatter_df,
-                x="실제(M€)", y="예측(M€)",
+                x="Actual (M€)", y="Predicted (M€)",
                 color="league",
                 hover_name="player",
                 hover_data={"team": True, "pos": True, "age": True,
-                            "골/90": True, "저평가(%)": True,
-                            "실제(M€)": ":.1f", "예측(M€)": ":.1f"},
+                            "Goals/90": True, "Undervalue (%)": True,
+                            "Actual (M€)": ":.1f", "Predicted (M€)": ":.1f"},
                 color_discrete_map={
                     "ENG-Premier League": "#7EB8F7",
                     "ESP-La Liga":        "#F7C97E",
@@ -377,26 +372,24 @@ with tab2:
                 height=500,
             )
 
-            # 등가선 (y = x)
-            max_val = max(scatter_df["실제(M€)"].max(), scatter_df["예측(M€)"].max())
+            max_val = max(scatter_df["Actual (M€)"].max(), scatter_df["Predicted (M€)"].max())
             fig_s.add_trace(go.Scatter(
                 x=[0, max_val], y=[0, max_val],
-                mode="lines", name="등가선 (적정가)",
+                mode="lines", name="Fair value line",
                 line=dict(color="#555", dash="dash", width=1),
             ))
-
             fig_s.update_layout(
                 paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                font_color="#ffffff", legend_title="리그",
+                font_color="#ffffff", legend_title="League",
                 margin=dict(t=20, b=40),
             )
-            fig_s.update_xaxes(gridcolor="#222", title="실제 시장가치 (M€)")
-            fig_s.update_yaxes(gridcolor="#222", title="예측 적정가치 (M€)")
+            fig_s.update_xaxes(gridcolor="#222", title="Actual market value (M€)")
+            fig_s.update_yaxes(gridcolor="#222", title="Predicted fair value (M€)")
             st.plotly_chart(fig_s, use_container_width=True)
 
-            # ── 저평가 선수 테이블 ────────────────────────────
+            # ── Undervalued table ─────────────────────────────
             st.divider()
-            st.subheader(f"저평가 TOP {len(df_val)}")
+            st.subheader(f"Undervalued TOP {len(df_val)}")
 
             st.dataframe(
                 df_val,
@@ -404,20 +397,20 @@ with tab2:
                 hide_index=True,
                 column_config={
                     "저평가점수(%)": st.column_config.ProgressColumn(
-                        "저평가점수(%)", min_value=0, max_value=100, format="%.1f%%"
+                        "Undervalue (%)", min_value=0, max_value=100, format="%.1f%%"
                     ),
-                    "골/90": st.column_config.NumberColumn("골/90", format="%.2f"),
-                    "어시스트/90": st.column_config.NumberColumn("어시스트/90", format="%.2f"),
-                    "실제몸값(M€)": st.column_config.NumberColumn("실제 (M€)", format="%.1f"),
-                    "예측몸값(M€)": st.column_config.NumberColumn("예측 (M€)", format="%.1f"),
+                    "골/90": st.column_config.NumberColumn("Goals/90", format="%.2f"),
+                    "어시스트/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
+                    "실제몸값(M€)": st.column_config.NumberColumn("Actual (M€)", format="%.1f"),
+                    "예측몸값(M€)": st.column_config.NumberColumn("Predicted (M€)", format="%.1f"),
                 },
             )
 
-            # ── 선수 상세 카드 ────────────────────────────────
+            # ── Player detail card ────────────────────────────
             st.divider()
-            st.subheader("선수 상세")
+            st.subheader("Player Detail")
             val_players = df_val["player"].tolist()
-            selected_val = st.selectbox("선수 선택", val_players, key="val_detail")
+            selected_val = st.selectbox("Select player", val_players, key="val_detail")
 
             if selected_val:
                 row = df_val[df_val["player"] == selected_val].iloc[0]
@@ -425,32 +418,28 @@ with tab2:
                 predict = row["예측몸값(M€)"]
                 score   = row["저평가점수(%)"]
                 tag     = "tag-under" if score > 0 else "tag-over"
-                label   = f"저평가 +{score:.1f}%" if score > 0 else f"고평가 {score:.1f}%"
+                label   = f"Undervalued +{score:.1f}%" if score > 0 else f"Overvalued {score:.1f}%"
 
                 m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("팀", row["team"])
-                m2.metric("포지션", row["pos"])
-                m3.metric("나이", str(row["age"]))
-                m4.metric("실제 몸값", f"€{actual:.1f}M")
-                m5.metric("예측 몸값", f"€{predict:.1f}M", delta=f"{score:+.1f}%")
+                m1.metric("Club", row["team"])
+                m2.metric("Position", row["pos"])
+                m3.metric("Age", str(row["age"]))
+                m4.metric("Market value", f"€{actual:.1f}M")
+                m5.metric("Model estimate", f"€{predict:.1f}M", delta=f"{score:+.1f}%")
 
-                st.markdown(
-                    f'<span class="{tag}">{label}</span>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<span class="{tag}">{label}</span>', unsafe_allow_html=True)
 
-                # 가치 비교 바 차트
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(
-                    name="실제 시장가치",
-                    x=["시장가치 비교"],
+                    name="Actual market value",
+                    x=["Value comparison"],
                     y=[actual],
                     marker_color="#F77E7E",
                     width=0.3,
                 ))
                 fig_bar.add_trace(go.Bar(
-                    name="예측 적정가치",
-                    x=["시장가치 비교"],
+                    name="Model estimate",
+                    x=["Value comparison"],
                     y=[predict],
                     marker_color="#7EF7A8",
                     width=0.3,
@@ -465,31 +454,31 @@ with tab2:
                 fig_bar.update_yaxes(gridcolor="#222")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                # ── 유사 선수 추천 ────────────────────────────
+                # ── Similar player recommendations ────────────
                 st.divider()
-                st.subheader("유사 선수 추천 (더 저렴한)")
-                st.caption("같은 스탯 프로파일 — 코사인 유사도 기반 / 더 낮은 몸값 우선")
-                with st.spinner("유사 선수 탐색 중..."):
+                st.subheader("Similar Players — Cheaper Alternatives")
+                st.caption("Same statistical profile · cosine similarity · lower market value")
+                with st.spinner("Finding similar players..."):
                     similar = get_similar_players(
                         selected_val,
                         max_value_eur=actual * 1_000_000 * 0.85,
                         top_n=8,
                     )
                 if similar.empty:
-                    st.info("유사 선수 데이터가 충분하지 않습니다.")
+                    st.info("No similar players found with sufficient data.")
                 else:
                     st.dataframe(
                         similar,
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "유사도(%)": st.column_config.ProgressColumn(
-                                "유사도(%)", min_value=0, max_value=100, format="%.1f%%"
+                            "Similarity (%)": st.column_config.ProgressColumn(
+                                "Similarity (%)", min_value=0, max_value=100, format="%.1f%%"
                             ),
-                            "저평가점수(%)": st.column_config.NumberColumn("저평가(%)", format="%.1f"),
-                            "골/90": st.column_config.NumberColumn("골/90", format="%.2f"),
-                            "어시스트/90": st.column_config.NumberColumn("어시/90", format="%.2f"),
-                            "실제몸값(M€)": st.column_config.NumberColumn("실제(M€)", format="%.1f"),
-                            "예측몸값(M€)": st.column_config.NumberColumn("예측(M€)", format="%.1f"),
+                            "Undervalue (%)": st.column_config.NumberColumn("Undervalue (%)", format="%.1f"),
+                            "Goals/90": st.column_config.NumberColumn("Goals/90", format="%.2f"),
+                            "Assists/90": st.column_config.NumberColumn("Assists/90", format="%.2f"),
+                            "Actual (M€)": st.column_config.NumberColumn("Actual (M€)", format="%.1f"),
+                            "Predicted (M€)": st.column_config.NumberColumn("Predicted (M€)", format="%.1f"),
                         },
                     )

@@ -310,9 +310,9 @@ def get_undervalued(
         "market_value_m", "predicted_value_m", "undervalue_score",
         "per_90_minutes_gls", "per_90_minutes_ast",
     ]].rename(columns={
-        "market_value_m":    "실제몸값(M€)",
-        "predicted_value_m": "예측몸값(M€)",
-        "undervalue_score":  "저평가점수(%)",
+        "market_value_m":     "실제몸값(M€)",
+        "predicted_value_m":  "예측몸값(M€)",
+        "undervalue_score":   "저평가점수(%)",
         "per_90_minutes_gls": "골/90",
         "per_90_minutes_ast": "어시스트/90",
     })
@@ -388,12 +388,12 @@ def get_similar_players(
             "similarity_pct", "per_90_minutes_gls", "per_90_minutes_ast"]
     cols = [c for c in cols if c in result.columns]
     return result[cols].rename(columns={
-        "market_value_m":    "실제몸값(M€)",
-        "predicted_value_m": "예측몸값(M€)",
-        "undervalue_score":  "저평가점수(%)",
-        "similarity_pct":    "유사도(%)",
-        "per_90_minutes_gls": "골/90",
-        "per_90_minutes_ast": "어시스트/90",
+        "market_value_m":     "Actual (M€)",
+        "predicted_value_m":  "Predicted (M€)",
+        "undervalue_score":   "Undervalue (%)",
+        "similarity_pct":     "Similarity (%)",
+        "per_90_minutes_gls": "Goals/90",
+        "per_90_minutes_ast": "Assists/90",
     })
 
 
