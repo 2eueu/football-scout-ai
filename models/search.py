@@ -32,9 +32,15 @@ GEMINI_SYSTEM_PROMPT = """
   "min_tackles": 숫자 | null,
   "min_interceptions": 숫자 | null,
   "min_minutes": 숫자 | null,
-  "sort_by": "goals" | "assists" | "pressures" | "tackles" | null,
+  "sort_by": "goals" | "assists" | "pressures" | "tackles" | "form" | "undervalue" | null,
   "limit": 숫자 (기본 10)
 }
+
+sort_by 선택 기준:
+- "form": "폼 좋은", "핫한", "요즘 잘하는", "최근 활약", "이번 시즌" 같은 표현
+- "undervalue": "저평가", "숨겨진", "가성비", "가격 대비" 같은 표현
+- "goals": 골 관련
+- "tackles"/"pressures": 수비/압박 관련
 
 포지션 매핑:
 - 스트라이커/공격수/FW → ["FW"]
@@ -121,46 +127,103 @@ def build_query(filters: dict) -> tuple[str, list]:
 
 
 SORT_COLUMN_MAP = {
-    "goals": "CAST(per_90_minutes_gls AS REAL)",
-    "assists": "CAST(per_90_minutes_ast AS REAL)",
-    "pressures": "CAST(performance_fld AS REAL)",
-    "tackles": "CAST(performance_tklw AS REAL)",
+    "goals":     "CAST(m.per_90_minutes_gls AS REAL)",
+    "assists":   "CAST(m.per_90_minutes_ast AS REAL)",
+    "pressures": "CAST(m.performance_fld AS REAL)",
+    "tackles":   "CAST(m.performance_tklw AS REAL)",
 }
 
 
 def search_players(filters: dict) -> pd.DataFrame:
     """필터 dict → 선수 검색 결과 DataFrame"""
     where_clause, params = build_query(filters)
-
-    sort_col = SORT_COLUMN_MAP.get(filters.get("sort_by") or "", "CAST(per_90_minutes_gls AS REAL)")
+    sort_by = filters.get("sort_by") or ""
     limit = int(filters.get("limit") or 10)
 
-    sql = f"""
-        SELECT
-            player,
-            team,
-            pos,
-            age,
-            league,
-            CAST(playing_time_min AS INTEGER)          AS minutes,
-            ROUND(CAST(per_90_minutes_gls AS REAL), 2) AS goals_p90,
-            ROUND(CAST(per_90_minutes_ast AS REAL), 2) AS assists_p90,
-            CAST(performance_gls AS INTEGER)           AS total_goals,
-            CAST(performance_ast AS INTEGER)           AS total_assists,
-            MAX(CAST(performance_tklw AS INTEGER))     AS tackles_won,
-            MAX(CAST(performance_int AS INTEGER))      AS interceptions,
-            CAST(performance_fls AS INTEGER)           AS fouls
-        FROM players_master
-        WHERE {where_clause}
-          AND player IS NOT NULL
-          AND player != ''
-          AND CAST(playing_time_min AS INTEGER) > 0
-        GROUP BY player, team, league
-        ORDER BY {sort_col} DESC
-        LIMIT ?
-    """
-    params.append(limit)
+    if sort_by == "form":
+        # 25-26 최신 시즌 퍼포먼스로 정렬
+        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
+            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
+            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
+        )
+        sql = f"""
+            SELECT
+                m.player, m.team, m.pos, m.age, m.league,
+                CAST(m.playing_time_min AS INTEGER) AS minutes,
+                ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
+                ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,
+                CAST(m.performance_gls AS INTEGER) AS total_goals,
+                CAST(m.performance_ast AS INTEGER) AS total_assists,
+                MAX(CAST(m.performance_tklw AS INTEGER)) AS tackles_won,
+                MAX(CAST(m.performance_int AS INTEGER)) AS interceptions,
+                CAST(m.performance_fls AS INTEGER) AS fouls,
+                ROUND(COALESCE(CAST(r.per_90_minutes_gls AS REAL), 0) +
+                      COALESCE(CAST(r.per_90_minutes_ast AS REAL), 0), 3) AS form_score
+            FROM players_master m
+            LEFT JOIN players_raw r
+                ON m.player = r.player AND r.season = '2526'
+                   AND CAST(r.playing_time_min AS INTEGER) >= 90
+            WHERE {where_master}
+              AND m.player IS NOT NULL AND m.player != ''
+              AND CAST(m.playing_time_min AS INTEGER) > 0
+            GROUP BY m.player, m.team, m.league
+            ORDER BY form_score DESC
+            LIMIT ?
+        """
+    elif sort_by == "undervalue":
+        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
+            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
+            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
+        )
+        sql = f"""
+            SELECT
+                m.player, m.team, m.pos, m.age, m.league,
+                CAST(m.playing_time_min AS INTEGER) AS minutes,
+                ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
+                ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,
+                CAST(m.performance_gls AS INTEGER) AS total_goals,
+                CAST(m.performance_ast AS INTEGER) AS total_assists,
+                MAX(CAST(m.performance_tklw AS INTEGER)) AS tackles_won,
+                MAX(CAST(m.performance_int AS INTEGER)) AS interceptions,
+                CAST(m.performance_fls AS INTEGER) AS fouls,
+                ROUND(COALESCE(CAST(v.undervalue_score AS REAL), 0), 1) AS undervalue_score
+            FROM players_master m
+            LEFT JOIN value_scouting v ON m.player = v.player
+            WHERE {where_master}
+              AND m.player IS NOT NULL AND m.player != ''
+              AND CAST(m.playing_time_min AS INTEGER) > 0
+              AND CAST(v.undervalue_score AS REAL) > 0
+            GROUP BY m.player, m.team, m.league
+            ORDER BY undervalue_score DESC
+            LIMIT ?
+        """
+    else:
+        sort_col = SORT_COLUMN_MAP.get(sort_by, "CAST(m.per_90_minutes_gls AS REAL)")
+        where_master = where_clause.replace("pos LIKE", "m.pos LIKE").replace(
+            "CAST(age", "CAST(m.age").replace("league IN", "m.league IN").replace(
+            "CAST(per_90", "CAST(m.per_90").replace("CAST(playing_time", "CAST(m.playing_time")
+        )
+        sql = f"""
+            SELECT
+                m.player, m.team, m.pos, m.age, m.league,
+                CAST(m.playing_time_min AS INTEGER) AS minutes,
+                ROUND(CAST(m.per_90_minutes_gls AS REAL), 2) AS goals_p90,
+                ROUND(CAST(m.per_90_minutes_ast AS REAL), 2) AS assists_p90,
+                CAST(m.performance_gls AS INTEGER) AS total_goals,
+                CAST(m.performance_ast AS INTEGER) AS total_assists,
+                MAX(CAST(m.performance_tklw AS INTEGER)) AS tackles_won,
+                MAX(CAST(m.performance_int AS INTEGER)) AS interceptions,
+                CAST(m.performance_fls AS INTEGER) AS fouls
+            FROM players_master m
+            WHERE {where_master}
+              AND m.player IS NOT NULL AND m.player != ''
+              AND CAST(m.playing_time_min AS INTEGER) > 0
+            GROUP BY m.player, m.team, m.league
+            ORDER BY {sort_col} DESC
+            LIMIT ?
+        """
 
+    params.append(limit)
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql(sql, conn, params=params)
     conn.close()

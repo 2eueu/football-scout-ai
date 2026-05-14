@@ -8,9 +8,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
+
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 DB_PATH = Path(__file__).parent.parent / "scout.db"
 MODEL_PATH = Path(__file__).parent.parent / "form_lstm.pt"
@@ -25,15 +30,16 @@ WINDOW = 5
 
 # ── 모델 정의 ─────────────────────────────────────────────────
 
-class FormLSTM(nn.Module):
-    def __init__(self, input_size: int = 6, hidden: int = 32, layers: int = 1):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden, layers, batch_first=True)
-        self.fc   = nn.Linear(hidden, 1)
+if TORCH_AVAILABLE:
+    class FormLSTM(nn.Module):
+        def __init__(self, input_size: int = 6, hidden: int = 32, layers: int = 1):
+            super().__init__()
+            self.lstm = nn.LSTM(input_size, hidden, layers, batch_first=True)
+            self.fc   = nn.Linear(hidden, 1)
 
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :]).squeeze(-1)
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.fc(out[:, -1, :]).squeeze(-1)
 
 
 # ── 데이터 준비 ───────────────────────────────────────────────
@@ -118,7 +124,9 @@ def train(epochs: int = 80, lr: float = 1e-3) -> FormLSTM:
     return model
 
 
-def load_model() -> tuple[FormLSTM, float]:
+def load_model():
+    if not TORCH_AVAILABLE:
+        raise RuntimeError("torch not available")
     if not MODEL_PATH.exists():
         train()
     data = torch.load(MODEL_PATH, weights_only=True)

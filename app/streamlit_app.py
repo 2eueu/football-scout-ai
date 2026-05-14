@@ -40,7 +40,7 @@ if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
 
 from models.search import parse_query, search_players, get_player_detail
 from models.form import get_form_trend, get_season_trend
-from models.value_scouting import get_undervalued
+from models.value_scouting import get_undervalued, get_similar_players
 
 st.set_page_config(
     page_title="Football Scout AI",
@@ -464,3 +464,32 @@ with tab2:
                 )
                 fig_bar.update_yaxes(gridcolor="#222")
                 st.plotly_chart(fig_bar, use_container_width=True)
+
+                # ── 유사 선수 추천 ────────────────────────────
+                st.divider()
+                st.subheader("유사 선수 추천 (더 저렴한)")
+                st.caption("같은 스탯 프로파일 — 코사인 유사도 기반 / 더 낮은 몸값 우선")
+                with st.spinner("유사 선수 탐색 중..."):
+                    similar = get_similar_players(
+                        selected_val,
+                        max_value_eur=actual * 1_000_000 * 0.85,
+                        top_n=8,
+                    )
+                if similar.empty:
+                    st.info("유사 선수 데이터가 충분하지 않습니다.")
+                else:
+                    st.dataframe(
+                        similar,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "유사도(%)": st.column_config.ProgressColumn(
+                                "유사도(%)", min_value=0, max_value=100, format="%.1f%%"
+                            ),
+                            "저평가점수(%)": st.column_config.NumberColumn("저평가(%)", format="%.1f"),
+                            "골/90": st.column_config.NumberColumn("골/90", format="%.2f"),
+                            "어시스트/90": st.column_config.NumberColumn("어시/90", format="%.2f"),
+                            "실제몸값(M€)": st.column_config.NumberColumn("실제(M€)", format="%.1f"),
+                            "예측몸값(M€)": st.column_config.NumberColumn("예측(M€)", format="%.1f"),
+                        },
+                    )

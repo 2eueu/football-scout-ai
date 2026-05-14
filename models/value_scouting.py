@@ -318,6 +318,85 @@ def get_undervalued(
     })
 
 
+SIMILARITY_FEATURES = [
+    "per_90_minutes_gls", "per_90_minutes_ast", "per_90_minutes_g_a",
+    "standard_sh_90", "performance_tklw", "performance_int",
+    "playing_time_min", "age_factor", "league_tier",
+]
+
+
+def get_similar_players(
+    player_name: str,
+    max_value_eur: float = None,
+    top_n: int = 10,
+) -> pd.DataFrame:
+    """코사인 유사도 기반 유사 선수 추천 — 더 저렴한 선수 우선."""
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.preprocessing import StandardScaler
+
+    conn = sqlite3.connect(DB_PATH)
+    master = pd.read_sql("SELECT * FROM players_master", conn)
+    try:
+        vs = pd.read_sql(
+            "SELECT player, market_value_eur, predicted_value_eur, undervalue_score FROM value_scouting",
+            conn,
+        )
+    except Exception:
+        vs = pd.DataFrame()
+    conn.close()
+
+    df = build_features(master)
+    if not vs.empty:
+        df = df.merge(vs, on="player", how="left")
+    else:
+        df["market_value_eur"] = 0
+        df["predicted_value_eur"] = np.nan
+        df["undervalue_score"] = np.nan
+
+    feat_cols = [c for c in SIMILARITY_FEATURES if c in df.columns]
+    X = df[feat_cols].fillna(0).values.astype(float)
+    X_scaled = StandardScaler().fit_transform(X)
+
+    target_idx = df[df["player"].str.lower() == player_name.lower()].index
+    if target_idx.empty:
+        target_idx = df[df["player"].str.contains(player_name, case=False, na=False)].index
+    if target_idx.empty:
+        return pd.DataFrame()
+
+    idx = target_idx[0]
+    target_vec = X_scaled[idx].reshape(1, -1)
+    sims = cosine_similarity(target_vec, X_scaled)[0]
+    df["similarity"] = sims
+
+    result = df[df.index != idx].copy()
+
+    target_val = df.loc[idx, "market_value_eur"] if "market_value_eur" in df.columns else 0
+    if max_value_eur:
+        result = result[result["market_value_eur"] <= max_value_eur]
+    elif target_val > 0:
+        result = result[result["market_value_eur"] <= target_val * 0.85]
+
+    result = result[result["market_value_eur"] > 0]
+    result = result.sort_values("similarity", ascending=False).head(top_n)
+
+    result["similarity_pct"] = (result["similarity"] * 100).round(1)
+    result["market_value_m"] = (result["market_value_eur"] / 1e6).round(1)
+    result["predicted_value_m"] = (result.get("predicted_value_eur", 0) / 1e6).round(1)
+
+    cols = ["player", "team", "league", "pos", "age",
+            "market_value_m", "predicted_value_m", "undervalue_score",
+            "similarity_pct", "per_90_minutes_gls", "per_90_minutes_ast"]
+    cols = [c for c in cols if c in result.columns]
+    return result[cols].rename(columns={
+        "market_value_m":    "실제몸값(M€)",
+        "predicted_value_m": "예측몸값(M€)",
+        "undervalue_score":  "저평가점수(%)",
+        "similarity_pct":    "유사도(%)",
+        "per_90_minutes_gls": "골/90",
+        "per_90_minutes_ast": "어시스트/90",
+    })
+
+
 if __name__ == "__main__":
     print("=== Value Scouting 파이프라인 ===\n")
     run_value_scouting(use_cached_tm=False)
