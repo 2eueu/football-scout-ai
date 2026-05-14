@@ -14,7 +14,7 @@ try:
     import torch
     import torch.nn as nn
     TORCH_AVAILABLE = True
-except ImportError:
+except Exception:
     TORCH_AVAILABLE = False
 
 DB_PATH = Path(__file__).parent.parent / "scout.db"

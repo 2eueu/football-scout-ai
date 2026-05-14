@@ -1,11 +1,7 @@
-soccerdata
-statsbombpy
 pandas
 numpy
 scikit-learn
 xgboost
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
 groq
 pyarrow
 streamlit
