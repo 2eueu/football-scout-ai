@@ -216,6 +216,10 @@ with tab1:
         badges = _form_badges()
         display = results.copy()
         display["Form"] = display["player"].map(badges).fillna("")
+        display["player"] = display.apply(
+            lambda r: f"{r['player']} ⚠" if pd.to_numeric(r.get("minutes", 900), errors="coerce") < 700 else r["player"],
+            axis=1,
+        )
         display = display.rename(columns={
             "player": "Player", "team": "Club", "pos": "Position",
             "age": "Age", "league": "League", "minutes": "Minutes",
@@ -673,6 +677,42 @@ with tab2:
             st.warning("No players found. Try adjusting the filters.")
         else:
             st.markdown(f"**{len(df_val)} players** identified")
+            if pos_filter == "GK":
+                st.info("⚠️ GK model has higher uncertainty (CV RMSE 0.75 vs 0.54–0.55 for outfield). Results are re-ranked by performance percentile composite (Save% + CS% + GA90 inverted + Saves/90).")
+                # Re-rank GKs by percentile composite instead of undervalue_score
+                try:
+                    conn_gk = sqlite3.connect(DB_PATH)
+                    gk_stats = pd.read_sql(
+                        """SELECT vs.player, vs.gk_save_pct, vs.gk_ga_p90,
+                                  vs.gk_cs_pct, vs.gk_saves_p90, vs.gk_pksave_pct
+                           FROM value_scouting vs
+                           WHERE vs.gk_save_pct IS NOT NULL AND vs.gk_save_pct > 0
+                             AND vs.playing_time_min >= 1500""",
+                        conn_gk,
+                    )
+                    conn_gk.close()
+                    if not gk_stats.empty:
+                        from scipy.stats import percentileofscore as _pof
+                        for col in ["gk_save_pct", "gk_cs_pct", "gk_saves_p90", "gk_pksave_pct"]:
+                            gk_stats[f"pct_{col}"] = gk_stats[col].apply(
+                                lambda v: _pof(gk_stats[col].dropna().values, v, kind="rank")
+                            )
+                        # GA/90: lower is better → invert
+                        gk_stats["pct_gk_ga_p90"] = gk_stats["gk_ga_p90"].apply(
+                            lambda v: 100 - _pof(gk_stats["gk_ga_p90"].dropna().values, v, kind="rank")
+                        )
+                        gk_stats["gk_perf_score"] = (
+                            gk_stats["pct_gk_save_pct"] * 0.35
+                            + gk_stats["pct_gk_cs_pct"] * 0.25
+                            + gk_stats["pct_gk_ga_p90"] * 0.25
+                            + gk_stats["pct_gk_saves_p90"] * 0.15
+                        ).round(1)
+                        df_val = df_val.merge(
+                            gk_stats[["player", "gk_perf_score"]], on="player", how="left"
+                        )
+                        df_val = df_val.sort_values("gk_perf_score", ascending=False)
+                except Exception:
+                    pass
 
             # ── Scatter: actual vs predicted value ───────────
             st.divider()

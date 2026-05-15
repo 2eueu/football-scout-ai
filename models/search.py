@@ -36,6 +36,12 @@ Output format:
   "limit": number (default 10)
 }
 
+Age rules (IMPORTANT):
+- "under X" / "X세 이하" / "X살 미만" → age_max: X-1  (strictly less than X)
+- "over X" / "X세 이상" → age_min: X+1
+- "aged X" / "X살" → age_min: X, age_max: X
+- Example: "under 25" → age_max: 24, NOT 25
+
 sort_by rules:
 - "form": "in form", "hot", "best form", "현재 폼 좋은", "요즘 잘하는", "이번 시즌"
 - "undervalue": "undervalued", "hidden gems", "bargain", "저평가", "가성비"
@@ -204,8 +210,9 @@ def search_players(filters: dict) -> pd.DataFrame:
             LEFT JOIN value_scouting v ON m.player = v.player
             WHERE {where_master}
               AND m.player IS NOT NULL AND m.player != ''
-              AND CAST(m.playing_time_min AS INTEGER) > 0
+              AND CAST(m.playing_time_min AS INTEGER) >= CASE WHEN m.pos LIKE '%GK%' THEN 1500 ELSE 900 END
               AND CAST(v.undervalue_score AS REAL) > 0
+              AND CAST(v.market_value_eur AS REAL) >= 2000000
             GROUP BY m.player, m.team, m.league
             ORDER BY undervalue_score DESC
             LIMIT ?

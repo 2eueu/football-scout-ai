@@ -485,23 +485,54 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     tm["player_key"] = tm["player_tm"].apply(_norm)
     master["player_key"] = master["player"].apply(_norm)
 
-    # Exact (normalised) match first — include contract_year if available
-    tm_cols = ["player_key", "market_value_eur"]
+    # Exact (normalised) match: league-aware first, then name-only fallback.
+    # League-aware prevents same-name players in different leagues cross-matching
+    # (e.g. two "Vitinha" — Serie A €8M vs Ligue 1 €110M).
+    tm_cols = ["player_key", "league", "market_value_eur"]
     if "contract_year" in tm.columns:
         tm_cols.append("contract_year")
-    merged = master.merge(
-        tm[tm_cols].drop_duplicates("player_key"),
-        on="player_key", how="left",
+
+    tm_dedup = (
+        tm[tm_cols]
+        .sort_values("market_value_eur", ascending=False)
+        .drop_duplicates(["player_key", "league"])
     )
 
-    # Fuzzy fallback for unmatched players
+    # 1st pass: match on player_key + league
+    merged = master.merge(
+        tm_dedup,
+        on=["player_key", "league"], how="left",
+    )
+
+    # 2nd pass: name-only for players still unmatched
+    unmatched_mask = merged["market_value_eur"].isna()
+    if unmatched_mask.any():
+        tm_name_only = (
+            tm_dedup.sort_values("market_value_eur", ascending=False)
+            .drop_duplicates("player_key")
+        )
+        fill_cols = ["market_value_eur"]
+        if "contract_year" in tm_name_only.columns:
+            fill_cols.append("contract_year")
+        fill = master.loc[unmatched_mask, ["player_key"]].merge(
+            tm_name_only[["player_key"] + fill_cols],
+            on="player_key", how="left",
+        )
+        for col in fill_cols:
+            merged.loc[unmatched_mask, col] = fill[col].values
+
+    # Fuzzy fallback for remaining unmatched players
     unmatched_mask = merged["market_value_eur"].isna()
     unmatched_count = unmatched_mask.sum()
     if unmatched_count > 0:
         try:
             from rapidfuzz import process, fuzz
-            tm_keys = tm["player_key"].unique().tolist()
-            tm_val_map = tm.drop_duplicates("player_key").set_index("player_key")["market_value_eur"].to_dict()
+            tm_name_only = (
+                tm_dedup.sort_values("market_value_eur", ascending=False)
+                .drop_duplicates("player_key")
+            )
+            tm_keys = tm_name_only["player_key"].tolist()
+            tm_val_map = tm_name_only.set_index("player_key")["market_value_eur"].to_dict()
             unmatched_keys = merged.loc[unmatched_mask, "player_key"].tolist()
             fuzzy_vals = []
             for key in unmatched_keys:
