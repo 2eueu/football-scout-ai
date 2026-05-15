@@ -158,30 +158,33 @@ def fetch_market_values() -> pd.DataFrame:
 
 BASE_FEATURES = [
     "age", "seasons_count",
-    "playing_time_min",                          # removed playing_time_90s (= min/90, exact duplicate)
-    "per_90_minutes_gls", "per_90_minutes_ast",  # removed g_a (= gls+ast, linear combination)
+    "playing_time_min",
+    "per_90_minutes_gls", "per_90_minutes_ast",
     "standard_sh_90", "standard_sot_90",
     "performance_tklw", "performance_int",
     "performance_fld", "performance_fls",
     "performance_crdy",
-    "xg_p90", "npxg_p90", "xa_p90",             # removed performance_gls/ast (correlated with min×rate)
-    "contract_years_remaining",                  # ★ new: biggest missing variable
+    "xg_p90", "npxg_p90", "xa_p90",
+    "contract_years_remaining",
+    "age_contract",       # age × contract interaction
+    "team_value_m",       # team prestige (median TM value of teammates)
+    "premium_nation",     # top football nation flag (BRA/FRA/ENG/ESP/ARG/GER/POR)
 ]
 
 POS_FEATURES = {
     "FW": BASE_FEATURES,
     "MF": BASE_FEATURES,
     "DF": [
-        "age", "seasons_count", "playing_time_min",   # removed playing_time_90s
+        "age", "seasons_count", "playing_time_min",
         "performance_tklw", "performance_int", "performance_fld", "performance_fls",
-        "performance_crdy", "per_90_minutes_g_a",     # keep g_a for DF (only offensive metric)
+        "performance_crdy", "per_90_minutes_g_a",
         "standard_sh_90", "xg_p90", "xa_p90",
-        "contract_years_remaining",
+        "contract_years_remaining", "age_contract", "team_value_m", "premium_nation",
     ],
     "GK": [
         "age", "seasons_count", "playing_time_min",
         "gk_save_pct", "gk_ga_p90", "gk_cs_pct", "gk_saves_p90",
-        "contract_years_remaining",
+        "contract_years_remaining", "age_contract", "team_value_m", "premium_nation",
     ],
 }
 
@@ -282,7 +285,36 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
             median_contract if pd.notna(median_contract) else 1.5
         )
     else:
-        df["contract_years_remaining"] = 1.5  # neutral fallback when no contract data
+        df["contract_years_remaining"] = 1.5
+
+    # Age × contract interaction: 24yo with 4 years left >> 32yo with 4 years left
+    df["age_contract"] = df["age"] * df["contract_years_remaining"]
+
+    # Premium nation flag: top football nations command a transfer market premium
+    PREMIUM_NATIONS = {"BRA", "FRA", "ENG", "ESP", "ARG", "GER", "POR",
+                       "NED", "ITA", "BEL", "URU", "COL"}
+    if "nation" in df.columns:
+        df["premium_nation"] = df["nation"].astype(str).str[:3].str.upper().isin(
+            PREMIUM_NATIONS
+        ).astype(float)
+    else:
+        df["premium_nation"] = 0.0
+
+    # Team prestige: median TM market value of players on the same team
+    # (computed across all players in df who have market values)
+    if "market_value_eur" in df.columns:
+        team_med = (
+            df[df["market_value_eur"] > 0]
+            .groupby("team")["market_value_eur"]
+            .median()
+            .div(1e6)          # store as M€ for scale compatibility
+            .rename("team_value_m")
+        )
+        df = df.join(team_med, on="team", how="left")
+        global_med = team_med.median()
+        df["team_value_m"] = df["team_value_m"].fillna(global_med if pd.notna(global_med) else 10.0)
+    else:
+        df["team_value_m"] = 10.0
 
     for col in BASE_FEATURES:
         if col in df.columns:
