@@ -57,8 +57,14 @@ def _get_league_teams(league_id: str, league_slug: str) -> dict:
         return {}
 
 
+def _parse_contract_year(text: str) -> int | None:
+    """Extract contract expiry year from TM cell text, e.g. 'Jun 30, 2027' → 2027."""
+    m = re.search(r"20(2[3-9]|3\d)", text)
+    return int(m.group()) if m else None
+
+
 def _scrape_team_squad(team_id: str, team_slug: str, league_name: str) -> list[dict]:
-    """Scrape market values for all players in a team squad."""
+    """Scrape market values + contract expiry for all players in a team squad."""
     import requests
     from bs4 import BeautifulSoup
     url = f"https://www.transfermarkt.com/{team_slug}/kader/verein/{team_id}/saison_id/2025"
@@ -79,10 +85,18 @@ def _scrape_team_squad(team_id: str, team_slug: str, league_name: str) -> list[d
                 val  = _parse_value(val_el.text.strip())
                 if val <= 0 or not name:
                     continue
+                # Contract expiry: scan td cells for a 202X/203X year
+                contract_year = None
+                for td in row.find_all("td"):
+                    yr = _parse_contract_year(td.get_text())
+                    if yr:
+                        contract_year = yr
+                        break
                 records.append({
-                    "player_tm":       name,
+                    "player_tm":        name,
                     "market_value_eur": val,
-                    "league":          league_name,
+                    "league":           league_name,
+                    "contract_year":    contract_year,
                 })
             except Exception:
                 continue
@@ -144,27 +158,31 @@ def fetch_market_values() -> pd.DataFrame:
 
 BASE_FEATURES = [
     "age", "seasons_count",
-    "playing_time_min", "playing_time_90s",
-    "per_90_minutes_gls", "per_90_minutes_ast", "per_90_minutes_g_a",
-    "performance_gls", "performance_ast",
+    "playing_time_min",                          # removed playing_time_90s (= min/90, exact duplicate)
+    "per_90_minutes_gls", "per_90_minutes_ast",  # removed g_a (= gls+ast, linear combination)
     "standard_sh_90", "standard_sot_90",
     "performance_tklw", "performance_int",
     "performance_fld", "performance_fls",
     "performance_crdy",
-    "xg_p90", "npxg_p90", "xa_p90",
+    "xg_p90", "npxg_p90", "xa_p90",             # removed performance_gls/ast (correlated with min×rate)
+    "contract_years_remaining",                  # ★ new: biggest missing variable
 ]
 
 POS_FEATURES = {
     "FW": BASE_FEATURES,
     "MF": BASE_FEATURES,
     "DF": [
-        "age", "seasons_count", "playing_time_min", "playing_time_90s",
+        "age", "seasons_count", "playing_time_min",   # removed playing_time_90s
         "performance_tklw", "performance_int", "performance_fld", "performance_fls",
-        "performance_crdy", "per_90_minutes_g_a",
+        "performance_crdy", "per_90_minutes_g_a",     # keep g_a for DF (only offensive metric)
         "standard_sh_90", "xg_p90", "xa_p90",
+        "contract_years_remaining",
     ],
-    "GK": ["age", "seasons_count", "playing_time_min",
-           "gk_save_pct", "gk_ga_p90", "gk_cs_pct", "gk_saves_p90"],
+    "GK": [
+        "age", "seasons_count", "playing_time_min",
+        "gk_save_pct", "gk_ga_p90", "gk_cs_pct", "gk_saves_p90",
+        "contract_years_remaining",
+    ],
 }
 
 # Position-agnostic fallback (used by report.py)
@@ -254,6 +272,18 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     }
     df["league_tier"] = df["league"].map(tier).fillna(1.0)
 
+    # Contract years remaining (2026 = current season end)
+    if "contract_year" in df.columns:
+        df["contract_years_remaining"] = (
+            pd.to_numeric(df["contract_year"], errors="coerce") - 2026
+        ).clip(lower=0, upper=6)
+        median_contract = df["contract_years_remaining"].replace(0, np.nan).median()
+        df["contract_years_remaining"] = df["contract_years_remaining"].fillna(
+            median_contract if pd.notna(median_contract) else 1.5
+        )
+    else:
+        df["contract_years_remaining"] = 1.5  # neutral fallback when no contract data
+
     for col in BASE_FEATURES:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -263,11 +293,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── 모델 학습 & 예측 (position-specific) ─────────────────────
 
-def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
+def _train_one_model(train_df: pd.DataFrame, feat_cols: list, n_total: int = None):
     from xgboost import XGBRegressor
     from sklearn.model_selection import cross_val_score
 
     train_df = train_df.copy()
+    n = len(train_df)
+    if n_total is None:
+        n_total = n
+
     # age² captures the non-linear value peak around mid-20s
     if "age" in train_df.columns and "age_sq" not in feat_cols:
         train_df["age_sq"] = train_df["age"] ** 2
@@ -277,26 +311,31 @@ def _train_one_model(train_df: pd.DataFrame, feat_cols: list):
     X = train_df[feat_cols].fillna(0)
     y = train_df["log_value"]
 
+    # Scale regularization by sample size: smaller n → stronger regularization
+    reg_lambda = 2.0 if n >= 400 else (4.0 if n >= 200 else 8.0)
+    min_child  = 5   if n >= 400 else (8   if n >= 200 else 12)
+    depth      = 4   if n >= 400 else (3   if n >= 200 else 2)
+
     model = XGBRegressor(
         n_estimators=500,
-        max_depth=4,
+        max_depth=depth,
         learning_rate=0.03,
         subsample=0.8,
         colsample_bytree=0.7,
-        min_child_weight=5,   # prevents overfitting on rare high-value players
-        reg_alpha=0.1,        # L1
-        reg_lambda=2.0,       # L2
+        min_child_weight=min_child,
+        reg_alpha=0.1,
+        reg_lambda=reg_lambda,
         random_state=42,
         verbosity=0,
     )
     model.fit(X, y)
 
     rmse = float("nan")
-    if len(train_df) >= 10:
-        cv = cross_val_score(model, X, y, cv=min(5, len(train_df) // 5),
+    if n >= 10:
+        cv = cross_val_score(model, X, y, cv=min(5, n // 5),
                              scoring="neg_root_mean_squared_error")
         rmse = float(-cv.mean())
-        print(f"  CV RMSE: {rmse:.4f} ± {cv.std():.4f}  (n={len(train_df)})")
+        print(f"  CV RMSE: {rmse:.4f} ± {cv.std():.4f}  (n={n})")
 
     return model, feat_cols, rmse
 
@@ -414,9 +453,12 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
     tm["player_key"] = tm["player_tm"].apply(_norm)
     master["player_key"] = master["player"].apply(_norm)
 
-    # Exact (normalised) match first
+    # Exact (normalised) match first — include contract_year if available
+    tm_cols = ["player_key", "market_value_eur"]
+    if "contract_year" in tm.columns:
+        tm_cols.append("contract_year")
     merged = master.merge(
-        tm[["player_key", "market_value_eur"]].drop_duplicates("player_key"),
+        tm[tm_cols].drop_duplicates("player_key"),
         on="player_key", how="left",
     )
 
@@ -478,6 +520,7 @@ def run_value_scouting(use_cached_tm: bool = False) -> pd.DataFrame:
                  "xg_p90", "npxg_p90", "xa_p90",
                  "performance_tklw", "performance_int",
                  "playing_time_min", "seasons_count", "latest_season",
+                 "contract_years_remaining",
                  "gk_save_pct", "gk_ga_p90", "gk_cs_pct",
                  "gk_pksave_pct", "gk_saves_p90", "gk_win_pct"]
     save_cols = [c for c in save_cols if c in result.columns]
