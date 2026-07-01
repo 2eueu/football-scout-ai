@@ -8,7 +8,6 @@
 [![XGBoost](https://img.shields.io/badge/XGBoost-position--specific-orange)](https://xgboost.readthedocs.io)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-**[→ Live Demo](https://football-scout-ai-kujc5juarc7gdz4vhwaapb.streamlit.app/)**
 
 ---
 
